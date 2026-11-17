@@ -237,6 +237,42 @@ def rank_for(xp, guild_id=None, user_id=None):
     return 'Novice' if guild_id is not None and user_id is not None else 'Unranked'
 
 
+def streak_blocked_rank_notice(gid: int, uid: int, xp: int) -> str:
+    """Private explanation of earned XP ranks still locked by streak requirements."""
+    # Refresh rank unlocks before reading permanent unlock history.
+    if rank_for(xp, gid, uid) == 'Unranked':
+        return ''
+    with connect() as db:
+        unlocked = {row['rank'] for row in db.execute(
+            'SELECT rank FROM rank_unlocks WHERE guild_id=? AND user_id=?',
+            (gid, uid),
+        )}
+    streak = active_streak(gid, uid)
+    blocked = [
+        (name, required)
+        for name, threshold in RANKS
+        if name in STREAK_REQUIREMENTS
+        and xp >= threshold
+        and name not in unlocked
+        and (required := STREAK_REQUIREMENTS[name]) > streak
+    ]
+    if not blocked:
+        return ''
+    lines = ['🔒 **Streak requirement not yet met**',
+             'You have enough XP, but still need an active weekly streak to unlock:']
+    for name, required in blocked:
+        lines.append(
+            f'• **{name}** — **{streak}/{required} weeks** '
+            f'(need **{required - streak}** more qualifying week(s)).'
+        )
+    lines.append(
+        'Complete your Weekly Side Quest in consecutive weeks to build your streak. '
+        'Paused weeks protect your streak but do not increase it. '
+        'Once a rank is unlocked, you won\'t need to repeat its streak requirement.'
+    )
+    return '\\n'.join(lines)
+
+
 def lifetime_objectives(guild_id: int, user_id: int) -> int:
     """Count recorded Starter and Weekly Side Quest objectives, not bonus rewards.
 
@@ -609,11 +645,14 @@ async def profile(interaction: discord.Interaction):
     xp = get_xp(interaction.guild_id, interaction.user.id)
     next_rank = next(((name, threshold) for name,threshold in RANKS if threshold>xp), None)
     upcoming = f'Next: **{next_rank[0]}** in **{next_rank[1]-xp} XP**' if next_rank else 'Maximum rank reached ✦'
-    await reply(interaction, f'✦ **{interaction.user.display_name}**\nRank: **{rank_for(xp, interaction.guild_id, interaction.user.id)}**\nXP: **{xp}**\nLifetime objectives completed: **{lifetime_objectives(interaction.guild_id, interaction.user.id)}**\nLongest streak: **{longest_streak(interaction.guild_id, interaction.user.id)} weeks**\n\n**Rewards**\n{reward_eligibility_text(interaction.guild_id, interaction.user.id)}\n{upcoming}\n\n🎟️ To request an unlocked rank reward, visit **#stats-and-streaks** and press **Claim Reward** in the Player Hub.')
+    streak_notice = streak_blocked_rank_notice(interaction.guild_id, interaction.user.id, xp)
+    await reply(interaction, f'✦ **{interaction.user.display_name}**\nRank: **{rank_for(xp, interaction.guild_id, interaction.user.id)}**\nXP: **{xp}**\nLifetime objectives completed: **{lifetime_objectives(interaction.guild_id, interaction.user.id)}**\nLongest streak: **{longest_streak(interaction.guild_id, interaction.user.id)} weeks**\n\n**Rewards**\n{reward_eligibility_text(interaction.guild_id, interaction.user.id)}\n{upcoming}' + ('\n\n' + streak_notice if streak_notice else '') + '\n\n🎟️ To request an unlocked rank reward, visit **#stats-and-streaks** and press **Claim Reward** in the Player Hub.')
 
 @bot.tree.command(name='ranks', description='See Guild XP milestones')
 async def ranks(interaction: discord.Interaction):
-    await reply(interaction, '**GYMGUILD RANKS**\n'+'\n'.join(f'✦ **{name}** — {threshold:,} XP' + (f' + {STREAK_REQUIREMENTS[name]}-week **active** streak to unlock' if name in STREAK_REQUIREMENTS else '') for name,threshold in RANKS) + '\n\n**Rank rules:** Streaks must be active when unlocking Master, Legend or Paragon. Once unlocked, breaking your streak will not demote you; losing XP below a rank threshold can. Regaining XP restores previously unlocked ranks without repeating the streak.\n**Rewards:** Master (10%), Legend (15%) and Paragon (20%) are unlocked permanently when their rank requirements are first met. Each reward can be claimed **once**, even after an XP demotion. Paused weeks preserve streaks but do not increase them.')
+    xp = get_xp(interaction.guild_id, interaction.user.id)
+    streak_notice = streak_blocked_rank_notice(interaction.guild_id, interaction.user.id, xp)
+    await reply(interaction, '**GYMGUILD RANKS**\n'+'\n'.join(f'✦ **{name}** — {threshold:,} XP' + (f' + {STREAK_REQUIREMENTS[name]}-week **active** streak to unlock' if name in STREAK_REQUIREMENTS else '') for name,threshold in RANKS) + '\n\n**Rank rules:** Streaks must be active when unlocking Master, Legend or Paragon. Once unlocked, breaking your streak will not demote you; losing XP below a rank threshold can. Regaining XP restores previously unlocked ranks without repeating the streak.\n**Rewards:** Master (10%), Legend (15%) and Paragon (20%) are unlocked permanently when their rank requirements are first met. Each reward can be claimed **once**, even after an XP demotion. Paused weeks preserve streaks but do not increase them.' + ('\n\n' + streak_notice if streak_notice else ''))
 
 
 
@@ -2033,9 +2072,11 @@ class PlayerStatsView(discord.ui.View):
         xp = get_xp(interaction.guild_id, interaction.user.id)
         next_rank = next(((name, threshold) for name, threshold in RANKS if threshold > xp), None)
         upcoming = f'Next: **{next_rank[0]}** in **{next_rank[1]-xp} XP**' if next_rank else 'Maximum rank reached ✦'
+        streak_notice = streak_blocked_rank_notice(interaction.guild_id, interaction.user.id, xp)
         await interaction.response.send_message(
             f'✦ **{interaction.user.display_name}** — Rank: **{rank_for(xp, interaction.guild_id, interaction.user.id)}** · XP: **{xp}**\n'
-            f'🎯 Lifetime objectives completed: **{lifetime_objectives(interaction.guild_id, interaction.user.id)}**\nLongest streak: **{longest_streak(interaction.guild_id, interaction.user.id)} weeks**\n\n**Rewards**\n{reward_eligibility_text(interaction.guild_id, interaction.user.id)}\n{upcoming}',
+            f'🎯 Lifetime objectives completed: **{lifetime_objectives(interaction.guild_id, interaction.user.id)}**\nLongest streak: **{longest_streak(interaction.guild_id, interaction.user.id)} weeks**\n\n**Rewards**\n{reward_eligibility_text(interaction.guild_id, interaction.user.id)}\n{upcoming}'
+            + ('\n\n' + streak_notice if streak_notice else ''),
             ephemeral=True)
 
     @discord.ui.button(label='Streak', emoji='🔥', style=discord.ButtonStyle.secondary,
@@ -2061,6 +2102,12 @@ class PlayerStatsView(discord.ui.View):
             'Unlocked ranks survive broken streaks. Only losing XP below a rank threshold can demote you; '
             'earning the XP back restores that rank without repeating the streak.\n\n'
             '**Each rank reward unlocks permanently and can be claimed once**, even if you later drop to a lower rank.'), inline=False)
+        streak_notice = streak_blocked_rank_notice(
+            interaction.guild_id, interaction.user.id,
+            get_xp(interaction.guild_id, interaction.user.id),
+        )
+        if streak_notice:
+            embed.add_field(name='🔒 Your rank progress', value=streak_notice, inline=False)
         embed.set_footer(text='GYMGUILD ✦ Where culture meets strength')
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
