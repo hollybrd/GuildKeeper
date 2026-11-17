@@ -20,10 +20,12 @@ TOKEN = os.getenv('DISCORD_TOKEN', '')
 GUILD_ID = int(os.getenv('GUILD_ID', '0'))
 QUESTS_CHANNEL_ID = int(os.getenv('QUESTS_CHANNEL_ID', '0'))
 ANNOUNCEMENTS_CHANNEL_ID = int(os.getenv('ANNOUNCEMENTS_CHANNEL_ID', '0'))
+LEVEL_UP_CHANNEL_ID = int(os.getenv('LEVEL_UP_CHANNEL_ID', '0'))
+HQ_CATEGORY_ID = int(os.getenv('HQ_CATEGORY_ID', '0'))
 TZ = ZoneInfo(os.getenv('TIMEZONE', 'Europe/London'))
 DB = Path(__file__).with_name('guildkeeper.db')
-RANKS = [('Novice', 0), ('Apprentice', 100), ('Adept', 300),
-         ('Expert', 600), ('Master', 1000), ('Legend', 2500),
+RANKS = [('Novice', 50), ('Apprentice', 300), ('Adept', 500),
+         ('Expert', 750), ('Master', 1000), ('Legend', 2500),
          ('Paragon', 5000)]
 TRAINING_LOG_CHANNEL_ID = int(os.getenv('TRAINING_LOG_CHANNEL_ID', '0'))
 GYM_CATEGORY_ID = int(os.getenv('GYM_CATEGORY_ID', '0'))
@@ -65,6 +67,7 @@ def setup_db():
     with connect() as db:
         db.executescript('''
         CREATE TABLE IF NOT EXISTS rank_unlocks (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, rank TEXT NOT NULL, unlocked_at TEXT NOT NULL, PRIMARY KEY(guild_id,user_id,rank));
+        CREATE TABLE IF NOT EXISTS rank_high_watermarks (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, rank TEXT NOT NULL, PRIMARY KEY(guild_id,user_id));
         CREATE TABLE IF NOT EXISTS admin_streak_weeks (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, week_key TEXT NOT NULL, added_at TEXT NOT NULL, PRIMARY KEY(guild_id,user_id,week_key));
         CREATE TABLE IF NOT EXISTS members (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
           xp INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,user_id));
@@ -120,6 +123,18 @@ def setup_db():
         CREATE TABLE IF NOT EXISTS schedule_posts (guild_id INTEGER NOT NULL, post_key TEXT NOT NULL,
           PRIMARY KEY(guild_id,post_key));
         ''')
+        # Seed historic high-rank achievements before any new rank is awarded.
+        # Keep the highest existing watermark on subsequent bot restarts.
+        historic = db.execute(
+            'SELECT guild_id, user_id, rank FROM rank_unlocks '
+            "WHERE rank IN ('Master', 'Legend', 'Paragon') "
+            "ORDER BY CASE rank WHEN 'Paragon' THEN 3 WHEN 'Legend' THEN 2 ELSE 1 END DESC"
+        ).fetchall()
+        for earned in historic:
+            db.execute(
+                'INSERT OR IGNORE INTO rank_high_watermarks(guild_id,user_id,rank) VALUES (?,?,?)',
+                (earned['guild_id'], earned['user_id'], earned['rank']),
+            )
         columns = {r['name'] for r in db.execute('PRAGMA table_info(reward_tickets)')}
         for col in ('closed_at', 'closed_by', 'close_reason'):
             if col not in columns:
@@ -199,16 +214,63 @@ def unlock_earned_ranks(gid, uid, xp):
                 db.execute('INSERT OR IGNORE INTO rank_unlocks VALUES (?,?,?,?)', (gid,uid,name,utc_now().isoformat()))
 
 def rank_for(xp, guild_id=None, user_id=None):
+    """A completed Starter Quest permanently unlocks Novice regardless of later XP loss."""
     if guild_id is not None and user_id is not None:
-        unlock_earned_ranks(guild_id,user_id,xp)
         with connect() as db:
-            unlocked = {r['rank'] for r in db.execute('SELECT rank FROM rank_unlocks WHERE guild_id=? AND user_id=?',(guild_id,user_id))}
+            onboarded = db.execute(
+                'SELECT 1 FROM starter_turnins WHERE guild_id=? AND user_id=?',
+                (guild_id, user_id),
+            ).fetchone() is not None
+        if not onboarded:
+            return 'Unranked'
+        unlock_earned_ranks(guild_id, user_id, xp)
+        with connect() as db:
+            unlocked = {r['rank'] for r in db.execute(
+                'SELECT rank FROM rank_unlocks WHERE guild_id=? AND user_id=?',
+                (guild_id, user_id),
+            )}
     else:
         unlocked = set()
     for name, threshold in reversed(RANKS):
         if xp >= threshold and (name not in STREAK_REQUIREMENTS or name in unlocked):
             return name
-    return 'Novice'
+    return 'Novice' if guild_id is not None and user_id is not None else 'Unranked'
+
+
+def streak_blocked_rank_notice(gid: int, uid: int, xp: int) -> str:
+    """Private explanation of earned XP ranks still locked by streak requirements."""
+    # Refresh rank unlocks before reading permanent unlock history.
+    if rank_for(xp, gid, uid) == 'Unranked':
+        return ''
+    with connect() as db:
+        unlocked = {row['rank'] for row in db.execute(
+            'SELECT rank FROM rank_unlocks WHERE guild_id=? AND user_id=?',
+            (gid, uid),
+        )}
+    streak = active_streak(gid, uid)
+    blocked = [
+        (name, required)
+        for name, threshold in RANKS
+        if name in STREAK_REQUIREMENTS
+        and xp >= threshold
+        and name not in unlocked
+        and (required := STREAK_REQUIREMENTS[name]) > streak
+    ]
+    if not blocked:
+        return ''
+    lines = ['🔒 **Streak requirement not yet met**',
+             'You have enough XP, but still need an active weekly streak to unlock:']
+    for name, required in blocked:
+        lines.append(
+            f'• **{name}** — **{streak}/{required} weeks** '
+            f'(need **{required - streak}** more qualifying week(s)).'
+        )
+    lines.append(
+        'Complete your Weekly Side Quest in consecutive weeks to build your streak. '
+        'Paused weeks protect your streak but do not increase it. '
+        'Once a rank is unlocked, you won\'t need to repeat its streak requirement.'
+    )
+    return '\n'.join(lines)
 
 
 def lifetime_objectives(guild_id: int, user_id: int) -> int:
@@ -264,27 +326,143 @@ class Guildkeeper(commands.Bot):
 
 bot = Guildkeeper(command_prefix='!', intents=intents)
 
-async def update_rank(member: discord.Member, xp: int) -> bool:
-    """Make exactly the earned rank role match XP; leave class and other roles alone."""
+async def announce_new_guild_member(member: discord.Member) -> None:
+    """Welcome members only after their completed starter quest unlocks the Guild."""
+    if not LEVEL_UP_CHANNEL_ID:
+        return
+    channel = member.guild.get_channel(LEVEL_UP_CHANNEL_ID)
+    if not isinstance(channel, discord.TextChannel):
+        log.warning('LEVEL_UP_CHANNEL_ID is not a text channel in this Guild')
+        return
+    stats = discord.utils.get(member.guild.text_channels, name='stats-and-streaks')
+    stats_link = stats.mention if stats else '#stats-and-streaks'
+    embed = discord.Embed(
+        title='✦ New Guild Member! ✦',
+        description=(
+            f'🎉 Congratulations {member.mention} — **Novice**!\n\n'
+            'You have successfully joined the guild and advanced to Novice! '
+            f'All channels are now unlocked. Check the {stats_link} channel any time '
+            'to review your XP and progress!\n\n'
+            f'✦ Current XP: **{get_xp(member.guild.id, member.id):,}**'
+        ),
+        colour=discord.Colour.from_rgb(104, 163, 153),
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    try:
+        await channel.send(
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(users=[member], roles=False, everyone=False),
+        )
+    except (discord.Forbidden, discord.HTTPException):
+        log.exception('Could not post new Guild Member announcement for %s', member.id)
+
+
+async def announce_level_up(member: discord.Member, old_rank: str, new_rank: str, xp: int) -> None:
+    """Celebrate genuine promotions, with HQ invitations for Master and above."""
+    if not LEVEL_UP_CHANNEL_ID:
+        return
+    channel = member.guild.get_channel(LEVEL_UP_CHANNEL_ID)
+    if not isinstance(channel, discord.TextChannel):
+        log.warning('LEVEL_UP_CHANNEL_ID is not a text channel in this Guild')
+        return
+    embed = discord.Embed(
+        title='✦ LEVEL UP! ✦',
+        description=(
+            f'**{member.display_name}** advanced from **{old_rank}** to **{new_rank}**!\n'
+            f'✦ Current XP: **{xp:,}**'
+        ),
+        colour=discord.Colour.from_rgb(104, 163, 153),
+    )
+    if new_rank in {'Master', 'Legend', 'Paragon'}:
+        hq = member.guild.get_channel(HQ_CATEGORY_ID) if HQ_CATEGORY_ID else None
+        destination = hq.mention if isinstance(hq, discord.CategoryChannel) else '**✦ GYMGUILD HQ ✦**'
+        embed.add_field(
+            name='🔐 GYMGUILD HQ UNLOCKED',
+            value=(
+                f'Your new rank gives you access to {destination}! '
+                'Help shape upcoming products through exclusive previews, surveys '
+                'and design discussions. HQ access lasts while your current rank '
+                'is Master or higher.'
+            ),
+            inline=False,
+        )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    try:
+        await channel.send(
+            content=f'🎉 Congratulations {member.mention} — **{new_rank}**!',
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(users=[member], roles=False, everyone=False),
+        )
+    except (discord.Forbidden, discord.HTTPException):
+        log.exception('Could not post level-up for member %s', member.id)
+
+
+def record_highest_rank(gid: int, uid: int, current: str, previous: str | None) -> bool:
+    """Keep a permanent highest-reached rank; return True for a new personal best.
+
+    Seed from the Discord role as well as the DB so an initial role resync
+    never produces a false celebration. Never lower the watermark on demotion.
+    """
+    rank_order = {name: i for i, (name, _) in enumerate(RANKS)}
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute(
+            'SELECT rank FROM rank_high_watermarks WHERE guild_id=? AND user_id=?',
+            (gid, uid),
+        ).fetchone()
+        baseline = row['rank'] if row else previous
+        # Existing Discord role also provides a baseline for older members.
+        if previous and (baseline is None or rank_order[previous] > rank_order[baseline]):
+            baseline = previous
+        personal_best = baseline is not None and rank_order[current] > rank_order[baseline]
+        highest = current if baseline is None or personal_best else baseline
+        db.execute(
+            'INSERT INTO rank_high_watermarks(guild_id,user_id,rank) VALUES (?,?,?) '
+            'ON CONFLICT(guild_id,user_id) DO UPDATE SET rank=excluded.rank',
+            (gid, uid, highest),
+        )
+    return personal_best
+
+
+async def update_rank(member: discord.Member, xp: int, announce: bool = True) -> bool:
+    """Sync rank roles and celebrate only new personal-best ranks, never repeats."""
     desired = rank_for(xp, member.guild.id, member.id)
-    rank_names = {name for name, _ in RANKS}
+    rank_order = {name: i for i, (name, _) in enumerate(RANKS)}
+    rank_names = set(rank_order)
     roles = {role.name: role for role in member.guild.roles if role.name in rank_names}
-    target = roles.get(desired)
-    if target is None:
+    member_access = member.guild.get_role(STARTER_ACCESS_ROLE_ID) if STARTER_ACCESS_ROLE_ID else None
+    # Starter Quest role is the gate: newcomers remain unranked, even if
+    # they have earned XP from starter objectives before turning the quest in.
+    qualified = member_access is not None and member_access in member.roles
+    target = roles.get(desired) if qualified else None
+    if qualified and desired != 'Unranked' and target is None:
         log.warning('Missing Discord rank role %s; create it in Server Settings > Roles', desired)
         return False
+    previous = [role.name for role in member.roles if role.name in rank_names]
+    old_rank = max(previous, key=rank_order.get) if previous else None
     old = [role for role in member.roles if role.name in rank_names and role != target]
     try:
         # One edit avoids a temporary gap between removing and adding ranks.
-        if old or target not in member.roles:
+        if old or (target is not None and target not in member.roles):
             new_roles = [role for role in member.roles if role not in old]
-            if target not in new_roles:
+            if target is not None and target not in new_roles:
                 new_roles.append(target)
             await member.edit(roles=new_roles, reason='Guildkeeper XP rank synchronisation')
-        return True
     except (discord.Forbidden, discord.HTTPException):
         log.exception('Could not update rank for member %s; check Manage Roles and role order', member.id)
         return False
+
+    # No rank history/announcements until the starter access role is granted.
+    if target is None:
+        return True
+    try:
+        is_new_best = record_highest_rank(member.guild.id, member.id, desired, old_rank)
+    except sqlite3.Error:
+        log.exception('Could not record highest rank for member %s', member.id)
+        return True
+    if announce and is_new_best and old_rank is not None:
+        await announce_level_up(member, old_rank, desired, xp)
+    return True
 
 
 async def sync_all_ranks(guild: discord.Guild) -> tuple[int, int]:
@@ -293,7 +471,7 @@ async def sync_all_ranks(guild: discord.Guild) -> tuple[int, int]:
     async for member in guild.fetch_members(limit=None):
         if member.bot:
             continue
-        if await update_rank(member, get_xp(guild.id, member.id)):
+        if await update_rank(member, get_xp(guild.id, member.id), announce=False):
             updated += 1
         else:
             failed += 1
@@ -379,7 +557,7 @@ async def admin_spawnpoint_test(interaction: discord.Interaction, member: discor
 async def on_member_join(member: discord.Member):
     if member.guild.id == GUILD_ID and not member.bot:
         await send_spawnpoint_welcome(member)
-        await update_rank(member, get_xp(member.guild.id, member.id))
+        await update_rank(member, get_xp(member.guild.id, member.id), announce=False)
         current_roles = {r.id for r in member.roles}
         if GYM_ROLE_IDS and current_roles & GYM_ROLE_IDS:
             await award_starter(member,'class')
@@ -467,11 +645,14 @@ async def profile(interaction: discord.Interaction):
     xp = get_xp(interaction.guild_id, interaction.user.id)
     next_rank = next(((name, threshold) for name,threshold in RANKS if threshold>xp), None)
     upcoming = f'Next: **{next_rank[0]}** in **{next_rank[1]-xp} XP**' if next_rank else 'Maximum rank reached ✦'
-    await reply(interaction, f'✦ **{interaction.user.display_name}**\nRank: **{rank_for(xp, interaction.guild_id, interaction.user.id)}**\nXP: **{xp}**\nLifetime objectives completed: **{lifetime_objectives(interaction.guild_id, interaction.user.id)}**\nLongest streak: **{longest_streak(interaction.guild_id, interaction.user.id)} weeks**\n\n**Rewards**\n{reward_eligibility_text(interaction.guild_id, interaction.user.id)}\n{upcoming}\n\n🎟️ To request an unlocked rank reward, visit **#stats-and-streaks** and press **Claim Reward** in the Player Hub.')
+    streak_notice = streak_blocked_rank_notice(interaction.guild_id, interaction.user.id, xp)
+    await reply(interaction, f'✦ **{interaction.user.display_name}**\nRank: **{rank_for(xp, interaction.guild_id, interaction.user.id)}**\nXP: **{xp}**\nLifetime objectives completed: **{lifetime_objectives(interaction.guild_id, interaction.user.id)}**\nLongest streak: **{longest_streak(interaction.guild_id, interaction.user.id)} weeks**\n\n**Rewards**\n{reward_eligibility_text(interaction.guild_id, interaction.user.id)}\n{upcoming}' + ('\n\n' + streak_notice if streak_notice else '') + '\n\n🎟️ To request an unlocked rank reward, visit **#stats-and-streaks** and press **Claim Reward** in the Player Hub.')
 
 @bot.tree.command(name='ranks', description='See Guild XP milestones')
 async def ranks(interaction: discord.Interaction):
-    await reply(interaction, '**GYMGUILD RANKS**\n'+'\n'.join(f'✦ **{name}** — {threshold:,} XP' + (f' + {STREAK_REQUIREMENTS[name]}-week **active** streak to unlock' if name in STREAK_REQUIREMENTS else '') for name,threshold in RANKS) + '\n\n**Rank rules:** Streaks must be active when unlocking Master, Legend or Paragon. Once unlocked, breaking your streak will not demote you; losing XP below a rank threshold can. Regaining XP restores previously unlocked ranks without repeating the streak.\n**Rewards:** Master (10%), Legend (15%) and Paragon (20%) are unlocked permanently when their rank requirements are first met. Each reward can be claimed **once**, even after an XP demotion. Paused weeks preserve streaks but do not increase them.')
+    xp = get_xp(interaction.guild_id, interaction.user.id)
+    streak_notice = streak_blocked_rank_notice(interaction.guild_id, interaction.user.id, xp)
+    await reply(interaction, '**GYMGUILD RANKS**\n'+'\n'.join(f'✦ **{name}** — {threshold:,} XP' + (f' + {STREAK_REQUIREMENTS[name]}-week **active** streak to unlock' if name in STREAK_REQUIREMENTS else '') for name,threshold in RANKS) + '\n\n**Rank rules:** Streaks must be active when unlocking Master, Legend or Paragon. Once unlocked, breaking your streak will not demote you; losing XP below a rank threshold can. Regaining XP restores previously unlocked ranks without repeating the streak.\n**Rewards:** Master (10%), Legend (15%) and Paragon (20%) are unlocked permanently when their rank requirements are first met. Each reward can be claimed **once**, even after an XP demotion. Paused weeks preserve streaks but do not increase them.' + ('\n\n' + streak_notice if streak_notice else ''))
 
 
 
@@ -985,7 +1166,8 @@ class StarterTurnInView(discord.ui.View):
             return await interaction.followup.send(
                 'Your quest is complete, but the access role is not configured. '
                 'Please contact an admin.', ephemeral=True)
-        if role not in member.roles:
+        newly_granted = role not in member.roles
+        if newly_granted:
             try:
                 await member.add_roles(role, reason='Completed and turned in all Starter Quest objectives')
             except (discord.Forbidden, discord.HTTPException):
@@ -993,9 +1175,16 @@ class StarterTurnInView(discord.ui.View):
                 return await interaction.followup.send(
                     'Your quest is complete, but I could not unlock your channels. '
                     'Please contact an admin.', ephemeral=True)
+        # Persist onboarding before rank sync, so Novice stays unlocked even
+        # if weekly inactivity later reduces XP below the 50 XP threshold.
         with connect() as db:
-            db.execute('INSERT OR IGNORE INTO starter_turnins VALUES (?,?,?)',
-                       (GUILD_ID, member.id, utc_now().isoformat()))
+            inserted = db.execute('INSERT OR IGNORE INTO starter_turnins VALUES (?,?,?)',
+                                  (GUILD_ID, member.id, utc_now().isoformat())).rowcount > 0
+        await update_rank(member, get_xp(GUILD_ID, member.id), announce=False)
+        # Only the original successful starter turn-in announces Novice;
+        # role restoration, duplicate clicks and old completed quests stay quiet.
+        if newly_granted and inserted:
+            await announce_new_guild_member(member)
         await interaction.followup.send(
             '🎉 **Welcome to the Guild!** All five Starter Quest objectives are complete, and all channels are unlocked.\n\n'
             '🔔 **Would you like to enable Guild Blast?** This optional role is used by admins and the Guildkeeper app in #announcements. '
@@ -1883,9 +2072,11 @@ class PlayerStatsView(discord.ui.View):
         xp = get_xp(interaction.guild_id, interaction.user.id)
         next_rank = next(((name, threshold) for name, threshold in RANKS if threshold > xp), None)
         upcoming = f'Next: **{next_rank[0]}** in **{next_rank[1]-xp} XP**' if next_rank else 'Maximum rank reached ✦'
+        streak_notice = streak_blocked_rank_notice(interaction.guild_id, interaction.user.id, xp)
         await interaction.response.send_message(
             f'✦ **{interaction.user.display_name}** — Rank: **{rank_for(xp, interaction.guild_id, interaction.user.id)}** · XP: **{xp}**\n'
-            f'🎯 Lifetime objectives completed: **{lifetime_objectives(interaction.guild_id, interaction.user.id)}**\nLongest streak: **{longest_streak(interaction.guild_id, interaction.user.id)} weeks**\n\n**Rewards**\n{reward_eligibility_text(interaction.guild_id, interaction.user.id)}\n{upcoming}',
+            f'🎯 Lifetime objectives completed: **{lifetime_objectives(interaction.guild_id, interaction.user.id)}**\nLongest streak: **{longest_streak(interaction.guild_id, interaction.user.id)} weeks**\n\n**Rewards**\n{reward_eligibility_text(interaction.guild_id, interaction.user.id)}\n{upcoming}'
+            + ('\n\n' + streak_notice if streak_notice else ''),
             ephemeral=True)
 
     @discord.ui.button(label='Streak', emoji='🔥', style=discord.ButtonStyle.secondary,
@@ -1911,6 +2102,12 @@ class PlayerStatsView(discord.ui.View):
             'Unlocked ranks survive broken streaks. Only losing XP below a rank threshold can demote you; '
             'earning the XP back restores that rank without repeating the streak.\n\n'
             '**Each rank reward unlocks permanently and can be claimed once**, even if you later drop to a lower rank.'), inline=False)
+        streak_notice = streak_blocked_rank_notice(
+            interaction.guild_id, interaction.user.id,
+            get_xp(interaction.guild_id, interaction.user.id),
+        )
+        if streak_notice:
+            embed.add_field(name='🔒 Your rank progress', value=streak_notice, inline=False)
         embed.set_footer(text='GYMGUILD ✦ Where culture meets strength')
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
