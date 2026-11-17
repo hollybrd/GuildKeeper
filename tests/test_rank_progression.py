@@ -100,7 +100,7 @@ class RankProgressionTests(unittest.TestCase):
             bot.streak_blocked_rank_notice(self.guild_id, self.user_id, 5000), "",
         )
 
-    def test_admin_testing_reset_replays_first_rank_up_and_preserves_other_history(self):
+    def test_admin_testing_reset_starts_at_novice_and_preserves_starter_and_rewards(self):
         self.finish_starter()
         with bot.connect() as db:
             db.execute("INSERT INTO members(guild_id,user_id,xp) VALUES (?,?,?)",
@@ -116,14 +116,22 @@ class RankProgressionTests(unittest.TestCase):
         bot.record_highest_rank(self.guild_id, self.user_id, 'Master', 'Novice')
         self.assertEqual(bot.rank_for(1600, self.guild_id, self.user_id), 'Master')
 
-        bot.reset_rank_test_data(self.guild_id, self.user_id)
-        self.assertEqual(bot.get_xp(self.guild_id, self.user_id), 0)
-        self.assertEqual(bot.rank_for(0, self.guild_id, self.user_id), 'Unranked')
+        self.assertEqual(bot.reset_rank_test_data(self.guild_id, self.user_id), 50)
+        self.assertEqual(bot.get_xp(self.guild_id, self.user_id), 50)
+        self.assertEqual(bot.rank_for(50, self.guild_id, self.user_id), 'Novice')
+        self.assertEqual(bot.rank_for(0, self.guild_id, self.user_id), 'Novice')
         with bot.connect() as db:
-            for table in ('starter_claims', 'starter_turnins', 'rank_unlocks', 'rank_high_watermarks'):
-                count = db.execute(f"SELECT COUNT(*) FROM {table} WHERE guild_id=? AND user_id=?",
-                                   (self.guild_id, self.user_id)).fetchone()[0]
-                self.assertEqual(count, 0, table)
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM starter_turnins WHERE guild_id=? AND user_id=?",
+                (self.guild_id, self.user_id)).fetchone()[0], 1)
+            claimed = {row['kind'] for row in db.execute(
+                'SELECT kind FROM starter_claims WHERE guild_id=? AND user_id=?',
+                (self.guild_id, self.user_id))}
+            self.assertEqual(claimed, set(bot.STARTER_REWARDS))
+            for table in ('rank_unlocks', 'rank_high_watermarks'):
+                self.assertEqual(db.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE guild_id=? AND user_id=?",
+                    (self.guild_id, self.user_id)).fetchone()[0], 0)
             self.assertEqual(db.execute(
                 "SELECT COUNT(*) FROM reward_tickets WHERE guild_id=? AND user_id=?",
                 (self.guild_id, self.user_id)).fetchone()[0], 1)
@@ -131,12 +139,17 @@ class RankProgressionTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM xp_log WHERE guild_id=? AND user_id=?",
                 (self.guild_id, self.user_id)).fetchone()[0], 1)
 
-        self.finish_starter()
-        self.assertEqual(bot.rank_for(50, self.guild_id, self.user_id), 'Novice')
-        self.assertFalse(bot.record_highest_rank(self.guild_id, self.user_id, 'Novice', None))
-        self.assertTrue(bot.record_highest_rank(self.guild_id, self.user_id, 'Apprentice', 'Novice'))
+        # The command seeds Novice as the announcement baseline before
+        # the first actual promotion; repeated promos still remain one-time.
+        self.assertEqual(bot.record_new_rank_milestones(
+            self.guild_id, self.user_id, 'Novice', None), [])
+        self.assertEqual(bot.record_new_rank_milestones(
+            self.guild_id, self.user_id, 'Apprentice', 'Novice'),
+            [('Novice', 'Apprentice')])
+        self.assertEqual(bot.record_new_rank_milestones(
+            self.guild_id, self.user_id, 'Apprentice', 'Novice'), [])
 
-    def test_admin_testing_reset_is_member_scoped(self):
+    def test_admin_testing_reset_is_member_scoped_and_can_skip_starter(self):
         other_id = self.user_id + 1
         with bot.connect() as db:
             db.execute("INSERT INTO members(guild_id,user_id,xp) VALUES (?,?,?)",
@@ -146,9 +159,19 @@ class RankProgressionTests(unittest.TestCase):
             db.execute("INSERT INTO starter_turnins(guild_id,user_id,turned_in_at) VALUES (?,?,?)",
                        (self.guild_id, other_id, bot.utc_now().isoformat()))
         bot.reset_rank_test_data(self.guild_id, self.user_id)
-        self.assertEqual(bot.get_xp(self.guild_id, self.user_id), 0)
+        self.assertEqual(bot.get_xp(self.guild_id, self.user_id), 50)
+        self.assertEqual(bot.rank_for(50, self.guild_id, self.user_id), 'Novice')
         self.assertEqual(bot.get_xp(self.guild_id, other_id), 3000)
         self.assertNotEqual(bot.rank_for(3000, self.guild_id, other_id), 'Unranked')
+
+    def test_repeated_test_resets_do_not_double_award_starter_xp(self):
+        bot.reset_rank_test_data(self.guild_id, self.user_id)
+        bot.reset_rank_test_data(self.guild_id, self.user_id)
+        self.assertEqual(bot.get_xp(self.guild_id, self.user_id), 50)
+        with bot.connect() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM starter_claims WHERE guild_id=? AND user_id=?",
+                (self.guild_id, self.user_id)).fetchone()[0], 5)
 
     def test_large_award_announces_each_rank_it_passes(self):
         self.finish_starter()
