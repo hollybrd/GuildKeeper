@@ -20,12 +20,14 @@ jobs:
         env:
           SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
           ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+          ORACLE_HOST_KEY: ${{ secrets.ORACLE_HOST_KEY }}
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H "$ORACLE_HOST" >> ~/.ssh/known_hosts
+          printf '%s\n' "$ORACLE_HOST_KEY" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
 
       - name: Deploy to Oracle
         env:
