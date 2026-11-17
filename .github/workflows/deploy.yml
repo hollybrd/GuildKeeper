@@ -1,0 +1,61 @@
+
+name: Deploy GuildKeeper
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guildkeeper-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$ORACLE_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy to Oracle
+        env:
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+        run: |
+          ssh "$ORACLE_USER@$ORACLE_HOST" 'bash -se' <<'EOF'
+          set -e
+
+          cd /home/ubuntu/discord-bots/GuildKeeper
+
+          # Back up player database
+          cp guildkeeper.db "$HOME/guildkeeper-backup.db"
+
+          # Download approved code
+          git pull --ff-only
+
+          # Update Python dependencies
+          .venv/bin/python -m pip install -r requirements.txt
+
+          # Validate Python syntax
+          .venv/bin/python -m py_compile bot.py
+
+          # Restart GuildKeeper
+          sudo -n systemctl restart guildkeeper
+
+          sleep 10
+
+          # Verify service is running
+          sudo -n systemctl is-active --quiet guildkeeper
+
+          echo "GuildKeeper deployment successful!"
+          EOF
