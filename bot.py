@@ -368,7 +368,8 @@ async def announce_level_up(member: discord.Member, old_rank: str, new_rank: str
     embed = discord.Embed(
         title='✦ LEVEL UP! ✦',
         description=(
-            f'**{member.display_name}** advanced from **{old_rank}** to **{new_rank}**!\n'
+            f'🎉 Congratulations {member.mention} — **{new_rank}**!\n\n'
+            f'You advanced from **{old_rank}** to **{new_rank}**!\n\n'
             f'✦ Current XP: **{xp:,}**'
         ),
         colour=discord.Colour.from_rgb(104, 163, 153),
@@ -389,7 +390,6 @@ async def announce_level_up(member: discord.Member, old_rank: str, new_rank: str
     embed.set_thumbnail(url=member.display_avatar.url)
     try:
         await channel.send(
-            content=f'🎉 Congratulations {member.mention} — **{new_rank}**!',
             embed=embed,
             allowed_mentions=discord.AllowedMentions(users=[member], roles=False, everyone=False),
         )
@@ -397,11 +397,14 @@ async def announce_level_up(member: discord.Member, old_rank: str, new_rank: str
         log.exception('Could not post level-up for member %s', member.id)
 
 
-def record_highest_rank(gid: int, uid: int, current: str, previous: str | None) -> bool:
-    """Keep a permanent highest-reached rank; return True for a new personal best.
+def record_new_rank_milestones(
+    gid: int, uid: int, current: str, previous: str | None,
+) -> list[tuple[str, str]]:
+    """Record the highest ever reached rank and list every newly crossed rank.
 
-    Seed from the Discord role as well as the DB so an initial role resync
-    never produces a false celebration. Never lower the watermark on demotion.
+    A single large XP award can pass multiple thresholds. Each newly crossed
+    rank gets its own first-time announcement, while a later demotion/recovery
+    cannot replay already reached milestones.
     """
     rank_order = {name: i for i, (name, _) in enumerate(RANKS)}
     with connect() as db:
@@ -411,17 +414,26 @@ def record_highest_rank(gid: int, uid: int, current: str, previous: str | None) 
             (gid, uid),
         ).fetchone()
         baseline = row['rank'] if row else previous
-        # Existing Discord role also provides a baseline for older members.
         if previous and (baseline is None or rank_order[previous] > rank_order[baseline]):
             baseline = previous
-        personal_best = baseline is not None and rank_order[current] > rank_order[baseline]
-        highest = current if baseline is None or personal_best else baseline
+        old_index = rank_order[baseline] if baseline is not None else rank_order[current]
+        new_index = rank_order[current]
+        crossed = [
+            (RANKS[index - 1][0], RANKS[index][0])
+            for index in range(max(old_index + 1, 1), new_index + 1)
+        ]
+        highest = current if baseline is None or new_index > old_index else baseline
         db.execute(
             'INSERT INTO rank_high_watermarks(guild_id,user_id,rank) VALUES (?,?,?) '
             'ON CONFLICT(guild_id,user_id) DO UPDATE SET rank=excluded.rank',
             (gid, uid, highest),
         )
-    return personal_best
+    return crossed
+
+
+def record_highest_rank(gid: int, uid: int, current: str, previous: str | None) -> bool:
+    """Backward-compatible boolean helper for existing rank regression tests."""
+    return bool(record_new_rank_milestones(gid, uid, current, previous))
 
 
 async def update_rank(member: discord.Member, xp: int, announce: bool = True) -> bool:
@@ -456,12 +468,13 @@ async def update_rank(member: discord.Member, xp: int, announce: bool = True) ->
     if target is None:
         return True
     try:
-        is_new_best = record_highest_rank(member.guild.id, member.id, desired, old_rank)
+        new_milestones = record_new_rank_milestones(member.guild.id, member.id, desired, old_rank)
     except sqlite3.Error:
         log.exception('Could not record highest rank for member %s', member.id)
         return True
-    if announce and is_new_best and old_rank is not None:
-        await announce_level_up(member, old_rank, desired, xp)
+    if announce:
+        for from_rank, to_rank in new_milestones:
+            await announce_level_up(member, from_rank, to_rank, xp)
     return True
 
 
