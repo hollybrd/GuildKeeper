@@ -14,7 +14,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Configure SSH
@@ -23,10 +23,14 @@ jobs:
           ORACLE_HOST_KEY: ${{ secrets.ORACLE_HOST_KEY }}
         run: |
           set -euo pipefail
+          umask 077
+
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
+
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
+
           printf '%s\n' "$ORACLE_HOST_KEY" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
@@ -40,13 +44,56 @@ jobs:
           umask 077
 
           if [[ -z "$GUILDKEEPER_ENV" ]]; then
-            echo "ERROR: GUILDKEEPER_ENV is empty or missing."
+            echo "ERROR: GUILDKEEPER_ENV is missing or empty."
             exit 1
           fi
 
           TEMP_ENV=$(mktemp)
           trap 'rm -f "$TEMP_ENV"' EXIT
+
           printf '%s\n' "$GUILDKEEPER_ENV" > "$TEMP_ENV"
+
+          echo "Preparing configuration validator..."
+          python3 -m venv /tmp/guildkeeper-validation-venv
+          /tmp/guildkeeper-validation-venv/bin/python -m pip install \
+            --quiet python-dotenv
+
+          echo "Validating GuildKeeper configuration..."
+
+          /tmp/guildkeeper-validation-venv/bin/python - "$TEMP_ENV" <<'PY'
+          import sys
+          from dotenv import dotenv_values
+
+          config = dotenv_values(sys.argv[1])
+
+          required = [
+              "DISCORD_TOKEN",
+              "GUILD_ID",
+              "QUESTS_CHANNEL_ID",
+              "ANNOUNCEMENTS_CHANNEL_ID",
+          ]
+
+          missing = [
+              key for key in required
+              if not config.get(key)
+          ]
+
+          if missing:
+              print(
+                  "ERROR: Missing required configuration keys:",
+                  ", ".join(missing)
+              )
+              sys.exit(1)
+
+          for key in required[1:]:
+              if not config[key].isdigit() or int(config[key]) <= 0:
+                  print(f"ERROR: Invalid Discord ID for {key}")
+                  sys.exit(1)
+
+          print("Configuration validation passed.")
+          PY
+
+          echo "Transferring configuration securely..."
 
           scp -o BatchMode=yes \
               -o StrictHostKeyChecking=yes \
@@ -69,11 +116,12 @@ jobs:
           PENDING_ENV="$HOME/guildkeeper-env-pending"
           BACKUP_DIR="$HOME/guildkeeper-backups"
           TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
+
           mkdir -p "$BACKUP_DIR"
           chmod 700 "$BACKUP_DIR"
 
           if [[ ! -s "$PENDING_ENV" ]]; then
-            echo "ERROR: Pending configuration missing or empty."
+            echo "ERROR: Pending configuration is missing or empty."
             exit 1
           fi
 
@@ -83,14 +131,17 @@ jobs:
           fi
 
           OLD_COMMIT=$(git rev-parse HEAD)
+
           ENV_BACKUP="$BACKUP_DIR/guildkeeper-$TIMESTAMP.env"
           DB_BACKUP="$BACKUP_DIR/guildkeeper-$TIMESTAMP.db"
 
           echo "Backing up current configuration..."
+
           cp -p .env "$ENV_BACKUP"
           chmod 600 "$ENV_BACKUP"
 
           echo "Backing up player database..."
+
           DB_BACKUP="$DB_BACKUP" .venv/bin/python - <<'PY'
           import os
           import sqlite3
@@ -100,11 +151,15 @@ jobs:
 
           try:
               source.backup(backup)
+
               result = backup.execute(
                   "PRAGMA integrity_check"
               ).fetchone()[0]
+
               if result != "ok":
-                  raise RuntimeError("Database backup integrity check failed")
+                  raise RuntimeError(
+                      "Database backup failed integrity check"
+                  )
           finally:
               backup.close()
               source.close()
@@ -116,33 +171,51 @@ jobs:
 
           rollback() {
             trap - ERR
-            echo "Deployment failed. Restoring previous configuration and code..."
+
+            echo "Deployment failed. Attempting rollback..."
+
             cp "$ENV_BACKUP" .env
             chmod 600 .env
+
             git reset --hard "$OLD_COMMIT"
+
             .venv/bin/python -m pip install -r requirements.txt
+
             sudo -n systemctl restart guildkeeper
             sleep 10
+
             sudo -n systemctl is-active --quiet guildkeeper
+
+            echo "Previous code and configuration restored."
           }
 
           trap rollback ERR
 
-          echo "Fetching latest code..."
+          echo "Fetching latest GuildKeeper code..."
+
           git fetch origin main
           git merge-base --is-ancestor HEAD origin/main
           git merge --ff-only origin/main
 
-          echo "Installing dependencies..."
+          echo "Installing Python dependencies..."
+
           .venv/bin/python -m pip install -r requirements.txt
+
+          echo "Checking Python syntax..."
+
           .venv/bin/python -m py_compile bot.py
 
           echo "Installing updated configuration..."
+
           install -m 600 "$PENDING_ENV" .env
 
           echo "Restarting GuildKeeper..."
+
           sudo -n systemctl restart guildkeeper
           sleep 10
+
+          echo "Checking GuildKeeper service..."
+
           sudo -n systemctl is-active --quiet guildkeeper
 
           trap - ERR
