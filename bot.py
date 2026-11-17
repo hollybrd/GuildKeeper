@@ -214,16 +214,27 @@ def unlock_earned_ranks(gid, uid, xp):
                 db.execute('INSERT OR IGNORE INTO rank_unlocks VALUES (?,?,?,?)', (gid,uid,name,utc_now().isoformat()))
 
 def rank_for(xp, guild_id=None, user_id=None):
+    """A completed Starter Quest permanently unlocks Novice regardless of later XP loss."""
     if guild_id is not None and user_id is not None:
-        unlock_earned_ranks(guild_id,user_id,xp)
         with connect() as db:
-            unlocked = {r['rank'] for r in db.execute('SELECT rank FROM rank_unlocks WHERE guild_id=? AND user_id=?',(guild_id,user_id))}
+            onboarded = db.execute(
+                'SELECT 1 FROM starter_turnins WHERE guild_id=? AND user_id=?',
+                (guild_id, user_id),
+            ).fetchone() is not None
+        if not onboarded:
+            return 'Unranked'
+        unlock_earned_ranks(guild_id, user_id, xp)
+        with connect() as db:
+            unlocked = {r['rank'] for r in db.execute(
+                'SELECT rank FROM rank_unlocks WHERE guild_id=? AND user_id=?',
+                (guild_id, user_id),
+            )}
     else:
         unlocked = set()
     for name, threshold in reversed(RANKS):
         if xp >= threshold and (name not in STREAK_REQUIREMENTS or name in unlocked):
             return name
-    return 'Unranked'
+    return 'Novice' if guild_id is not None and user_id is not None else 'Unranked'
 
 
 def lifetime_objectives(guild_id: int, user_id: int) -> int:
@@ -1125,12 +1136,12 @@ class StarterTurnInView(discord.ui.View):
                 return await interaction.followup.send(
                     'Your quest is complete, but I could not unlock your channels. '
                     'Please contact an admin.', ephemeral=True)
-        # The member now has starter access; grant the earned XP rank.
-        # Novice is 50 XP (five starter objectives, 10 XP each).
-        await update_rank(member, get_xp(GUILD_ID, member.id), announce=False)
+        # Persist onboarding before rank sync, so Novice stays unlocked even
+        # if weekly inactivity later reduces XP below the 50 XP threshold.
         with connect() as db:
             inserted = db.execute('INSERT OR IGNORE INTO starter_turnins VALUES (?,?,?)',
                                   (GUILD_ID, member.id, utc_now().isoformat())).rowcount > 0
+        await update_rank(member, get_xp(GUILD_ID, member.id), announce=False)
         # Only the original successful starter turn-in announces Novice;
         # role restoration, duplicate clicks and old completed quests stay quiet.
         if newly_granted and inserted:
