@@ -1,5 +1,5 @@
 
-name: Test GuildKeeper Connection
+name: Deploy GuildKeeper
 
 on:
   workflow_dispatch:
@@ -7,8 +7,12 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: guildkeeper-deployment
+  cancel-in-progress: false
+
 jobs:
-  test-connection:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
@@ -24,7 +28,7 @@ jobs:
           printf '%s\n' "$ORACLE_HOST_KEY" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
-      - name: Test Oracle connection
+      - name: Deploy to Oracle
         env:
           ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
           ORACLE_USER: ${{ secrets.ORACLE_USER }}
@@ -32,5 +36,83 @@ jobs:
           ssh -o BatchMode=yes \
               -o StrictHostKeyChecking=yes \
               -o ConnectTimeout=15 \
-              "$ORACLE_USER@$ORACLE_HOST" \
-              'echo "SUCCESS: GitHub connected to Oracle!"'
+              "$ORACLE_USER@$ORACLE_HOST" 'bash -se' <<'EOF'
+          set -Eeuo pipefail
+
+          cd /home/ubuntu/discord-bots/GuildKeeper
+
+          echo "Checking working directory..."
+          if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+            echo "ERROR: Uncommitted tracked changes detected."
+            exit 1
+          fi
+
+          OLD_COMMIT=$(git rev-parse HEAD)
+          BACKUP_DIR="$HOME/guildkeeper-backups"
+          TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
+          mkdir -p "$BACKUP_DIR"
+          chmod 700 "$BACKUP_DIR"
+
+          BACKUP_PATH="$BACKUP_DIR/guildkeeper-$TIMESTAMP.db"
+
+          echo "Backing up player database..."
+
+          BACKUP_PATH="$BACKUP_PATH" .venv/bin/python - <<'PY'
+          import os
+          import sqlite3
+
+          source = sqlite3.connect("guildkeeper.db")
+          backup = sqlite3.connect(os.environ["BACKUP_PATH"])
+
+          try:
+              source.backup(backup)
+              result = backup.execute(
+                  "PRAGMA integrity_check"
+              ).fetchone()[0]
+              if result != "ok":
+                  raise RuntimeError("Database backup failed integrity check")
+          finally:
+              backup.close()
+              source.close()
+
+          print("Database backup verified.")
+          PY
+
+          chmod 600 "$BACKUP_PATH"
+
+          rollback() {
+            echo "Deployment failed. Restoring previous code..."
+            git reset --hard "$OLD_COMMIT"
+            sudo -n systemctl restart guildkeeper
+          }
+
+          trap rollback ERR
+
+          echo "Fetching latest code..."
+          git fetch origin main
+
+          echo "Checking update can be applied safely..."
+          git merge-base --is-ancestor HEAD origin/main
+
+          echo "Updating code..."
+          git merge --ff-only origin/main
+
+          echo "Installing dependencies..."
+          .venv/bin/python -m pip install -r requirements.txt
+
+          echo "Checking Python syntax..."
+          .venv/bin/python -m py_compile bot.py
+
+          echo "Restarting GuildKeeper..."
+          sudo -n systemctl restart guildkeeper
+
+          sleep 10
+
+          echo "Checking service..."
+          sudo -n systemctl is-active --quiet guildkeeper
+
+          trap - ERR
+
+          echo "GuildKeeper deployment successful!"
+          echo "Database backup: $BACKUP_PATH"
+          EOF
