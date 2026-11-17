@@ -150,6 +150,45 @@ class RankProgressionTests(unittest.TestCase):
         self.assertEqual(bot.get_xp(self.guild_id, other_id), 3000)
         self.assertNotEqual(bot.rank_for(3000, self.guild_id, other_id), 'Unranked')
 
+    def test_large_award_announces_each_rank_it_passes(self):
+        self.finish_starter()
+        self.assertEqual(
+            bot.record_new_rank_milestones(self.guild_id, self.user_id, 'Novice', None), []
+        )
+        self.assertEqual(
+            bot.record_new_rank_milestones(self.guild_id, self.user_id, 'Adept', 'Novice'),
+            [('Novice', 'Apprentice'), ('Apprentice', 'Adept')],
+        )
+        self.assertEqual(
+            bot.record_new_rank_milestones(self.guild_id, self.user_id, 'Master', 'Adept'),
+            [('Adept', 'Expert'), ('Expert', 'Master')],
+        )
+        self.assertEqual(
+            bot.record_new_rank_milestones(self.guild_id, self.user_id, 'Adept', 'Master'), []
+        )
+        self.assertEqual(
+            bot.record_new_rank_milestones(self.guild_id, self.user_id, 'Master', 'Adept'), []
+        )
+        self.assertEqual(
+            bot.record_new_rank_milestones(self.guild_id, self.user_id, 'Legend', 'Master'),
+            [('Master', 'Legend')],
+        )
+
+    def test_rank_milestones_preserved_across_database_reopen(self):
+        self.finish_starter()
+        self.assertEqual(
+            bot.record_new_rank_milestones(self.guild_id, self.user_id, 'Apprentice', 'Novice'),
+            [('Novice', 'Apprentice')],
+        )
+        with bot.connect() as db:
+            self.assertEqual(db.execute(
+                'SELECT rank FROM rank_high_watermarks WHERE guild_id=? AND user_id=?',
+                (self.guild_id, self.user_id),
+            ).fetchone()['rank'], 'Apprentice')
+        self.assertEqual(
+            bot.record_new_rank_milestones(self.guild_id, self.user_id, 'Apprentice', 'Novice'), []
+        )
+
     def test_promotion_history_never_reannounces_same_rank(self):
         remember = bot.record_highest_rank
         self.assertFalse(remember(self.guild_id, self.user_id, "Novice", None))
