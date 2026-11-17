@@ -70,6 +70,36 @@ class RankProgressionTests(unittest.TestCase):
         self.assertEqual(bot.rank_for(0, self.guild_id, self.user_id), "Novice")
         self.assertEqual(bot.rank_for(1000, self.guild_id, self.user_id), "Master")
 
+    def test_streak_notice_only_when_xp_is_enough_but_streak_locked(self):
+        self.finish_starter()
+        self.assertEqual(
+            bot.streak_blocked_rank_notice(self.guild_id, self.user_id, 999), "",
+        )
+        notice = bot.streak_blocked_rank_notice(self.guild_id, self.user_id, 1000)
+        self.assertIn("Master", notice)
+        self.assertIn("0/2 weeks", notice)
+        self.assertNotIn("Legend", notice)
+        self.assertIn("\\n", notice)
+
+    def test_streak_notice_multiple_eligible_ranks_and_permanent_unlocks(self):
+        self.finish_starter()
+        notice = bot.streak_blocked_rank_notice(self.guild_id, self.user_id, 5000)
+        for name in ("Master", "Legend", "Paragon"):
+            self.assertIn(name, notice)
+        with bot.connect() as db:
+            db.execute(
+                "INSERT INTO rank_unlocks(guild_id,user_id,rank,unlocked_at) VALUES (?,?,?,?)",
+                (self.guild_id, self.user_id, "Master", bot.utc_now().isoformat()),
+            )
+        notice = bot.streak_blocked_rank_notice(self.guild_id, self.user_id, 5000)
+        self.assertNotIn("**Master**", notice)
+        self.assertIn("**Legend**", notice)
+
+    def test_streak_notice_not_shown_to_unranked_members(self):
+        self.assertEqual(
+            bot.streak_blocked_rank_notice(self.guild_id, self.user_id, 5000), "",
+        )
+
     def test_promotion_history_never_reannounces_same_rank(self):
         remember = bot.record_highest_rank
         self.assertFalse(remember(self.guild_id, self.user_id, "Novice", None))
