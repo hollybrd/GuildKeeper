@@ -1,5 +1,5 @@
 
-name: Deploy GuildKeeper
+name: Test GuildKeeper Connection
 
 on:
   workflow_dispatch:
@@ -7,12 +7,8 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: guildkeeper-deployment
-  cancel-in-progress: false
-
 jobs:
-  deploy:
+  test-connection:
     runs-on: ubuntu-latest
 
     steps:
@@ -28,75 +24,13 @@ jobs:
           printf '%s\n' "$ORACLE_HOST_KEY" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
-      - name: Deploy to Oracle
+      - name: Test Oracle connection
         env:
           ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
           ORACLE_USER: ${{ secrets.ORACLE_USER }}
         run: |
-          ssh -o StrictHostKeyChecking=yes \
-            "$ORACLE_USER@$ORACLE_HOST" 'bash -se' <<'EOF'
-          set -Eeuo pipefail
-
-          cd /home/ubuntu/discord-bots/GuildKeeper
-
-          OLD_COMMIT=$(git rev-parse HEAD)
-          BACKUP_DIR="$HOME/guildkeeper-backups"
-          TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
-          mkdir -p "$BACKUP_DIR"
-          chmod 700 "$BACKUP_DIR"
-
-          echo "Backing up player database..."
-
-          BACKUP_PATH="$BACKUP_DIR/guildkeeper-$TIMESTAMP.db"
-
-          BACKUP_PATH="$BACKUP_PATH" .venv/bin/python - <<'PY'
-          import os
-          import sqlite3
-
-          source = sqlite3.connect("guildkeeper.db")
-          backup = sqlite3.connect(os.environ["BACKUP_PATH"])
-          try:
-              source.backup(backup)
-              result = backup.execute(
-                  "PRAGMA integrity_check"
-              ).fetchone()[0]
-              if result != "ok":
-                  raise RuntimeError("Backup integrity check failed")
-          finally:
-              backup.close()
-              source.close()
-
-          print("Database backup verified.")
-          PY
-
-          chmod 600 "$BACKUP_PATH"
-
-          rollback() {
-            echo "Deployment failed. Restoring previous code..."
-            git reset --hard "$OLD_COMMIT"
-            sudo -n systemctl restart guildkeeper
-          }
-
-          trap rollback ERR
-
-          echo "Downloading latest code..."
-          git pull --ff-only origin main
-
-          echo "Installing dependencies..."
-          .venv/bin/python -m pip install -r requirements.txt
-
-          echo "Checking Python syntax..."
-          .venv/bin/python -m py_compile bot.py
-
-          echo "Restarting GuildKeeper..."
-          sudo -n systemctl restart guildkeeper
-
-          sleep 10
-
-          sudo -n systemctl is-active --quiet guildkeeper
-
-          trap - ERR
-
-          echo "GuildKeeper deployment successful!"
-          echo "Database backup: $BACKUP_PATH"
-          EOF
+          ssh -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=15 \
+              "$ORACLE_USER@$ORACLE_HOST" \
+              'echo "SUCCESS: GitHub connected to Oracle!"'
