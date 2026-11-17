@@ -79,7 +79,7 @@ class RankProgressionTests(unittest.TestCase):
         self.assertIn("Master", notice)
         self.assertIn("0/2 weeks", notice)
         self.assertNotIn("Legend", notice)
-        self.assertIn("\\n", notice)
+        self.assertIn("\n", notice)
 
     def test_streak_notice_multiple_eligible_ranks_and_permanent_unlocks(self):
         self.finish_starter()
