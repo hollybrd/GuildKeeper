@@ -14,6 +14,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Configure SSH
@@ -21,6 +22,7 @@ jobs:
           SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
           ORACLE_HOST_KEY: ${{ secrets.ORACLE_HOST_KEY }}
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
@@ -28,41 +30,73 @@ jobs:
           printf '%s\n' "$ORACLE_HOST_KEY" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
-      - name: Deploy to Oracle
+      - name: Validate and transfer configuration
+        env:
+          GUILDKEEPER_ENV: ${{ secrets.GUILDKEEPER_ENV }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+        run: |
+          set -euo pipefail
+          umask 077
+
+          if [[ -z "$GUILDKEEPER_ENV" ]]; then
+            echo "ERROR: GUILDKEEPER_ENV is empty or missing."
+            exit 1
+          fi
+
+          TEMP_ENV=$(mktemp)
+          trap 'rm -f "$TEMP_ENV"' EXIT
+          printf '%s\n' "$GUILDKEEPER_ENV" > "$TEMP_ENV"
+
+          scp -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes \
+              "$TEMP_ENV" \
+              "$ORACLE_USER@$ORACLE_HOST:/home/ubuntu/guildkeeper-env-pending"
+
+      - name: Deploy code and configuration
         env:
           ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
           ORACLE_USER: ${{ secrets.ORACLE_USER }}
         run: |
           ssh -o BatchMode=yes \
               -o StrictHostKeyChecking=yes \
-              -o ConnectTimeout=15 \
               "$ORACLE_USER@$ORACLE_HOST" 'bash -se' <<'EOF'
           set -Eeuo pipefail
+          umask 077
 
           cd /home/ubuntu/discord-bots/GuildKeeper
 
-          echo "Checking working directory..."
+          PENDING_ENV="$HOME/guildkeeper-env-pending"
+          BACKUP_DIR="$HOME/guildkeeper-backups"
+          TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
+          mkdir -p "$BACKUP_DIR"
+          chmod 700 "$BACKUP_DIR"
+
+          if [[ ! -s "$PENDING_ENV" ]]; then
+            echo "ERROR: Pending configuration missing or empty."
+            exit 1
+          fi
+
           if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
             echo "ERROR: Uncommitted tracked changes detected."
             exit 1
           fi
 
           OLD_COMMIT=$(git rev-parse HEAD)
-          BACKUP_DIR="$HOME/guildkeeper-backups"
-          TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
-          mkdir -p "$BACKUP_DIR"
-          chmod 700 "$BACKUP_DIR"
+          ENV_BACKUP="$BACKUP_DIR/guildkeeper-$TIMESTAMP.env"
+          DB_BACKUP="$BACKUP_DIR/guildkeeper-$TIMESTAMP.db"
 
-          BACKUP_PATH="$BACKUP_DIR/guildkeeper-$TIMESTAMP.db"
+          echo "Backing up current configuration..."
+          cp -p .env "$ENV_BACKUP"
+          chmod 600 "$ENV_BACKUP"
 
           echo "Backing up player database..."
-
-          BACKUP_PATH="$BACKUP_PATH" .venv/bin/python - <<'PY'
+          DB_BACKUP="$DB_BACKUP" .venv/bin/python - <<'PY'
           import os
           import sqlite3
 
           source = sqlite3.connect("guildkeeper.db")
-          backup = sqlite3.connect(os.environ["BACKUP_PATH"])
+          backup = sqlite3.connect(os.environ["DB_BACKUP"])
 
           try:
               source.backup(backup)
@@ -70,7 +104,7 @@ jobs:
                   "PRAGMA integrity_check"
               ).fetchone()[0]
               if result != "ok":
-                  raise RuntimeError("Database backup failed integrity check")
+                  raise RuntimeError("Database backup integrity check failed")
           finally:
               backup.close()
               source.close()
@@ -78,44 +112,42 @@ jobs:
           print("Database backup verified.")
           PY
 
-          chmod 600 "$BACKUP_PATH"
+          chmod 600 "$DB_BACKUP"
 
           rollback() {
-          echo "Deployment failed. Restoring previous code..."
-          git reset --hard "$OLD_COMMIT"
-          .venv/bin/python -m pip install -r requirements.txt
-          sudo -n systemctl restart guildkeeper
-          sleep 10
-          sudo -n systemctl is-active --quiet guildkeeper
+            trap - ERR
+            echo "Deployment failed. Restoring previous configuration and code..."
+            cp "$ENV_BACKUP" .env
+            chmod 600 .env
+            git reset --hard "$OLD_COMMIT"
+            .venv/bin/python -m pip install -r requirements.txt
+            sudo -n systemctl restart guildkeeper
+            sleep 10
+            sudo -n systemctl is-active --quiet guildkeeper
           }
 
           trap rollback ERR
 
           echo "Fetching latest code..."
           git fetch origin main
-
-          echo "Checking update can be applied safely..."
           git merge-base --is-ancestor HEAD origin/main
-
-          echo "Updating code..."
           git merge --ff-only origin/main
 
           echo "Installing dependencies..."
           .venv/bin/python -m pip install -r requirements.txt
-
-          echo "Checking Python syntax..."
           .venv/bin/python -m py_compile bot.py
+
+          echo "Installing updated configuration..."
+          install -m 600 "$PENDING_ENV" .env
 
           echo "Restarting GuildKeeper..."
           sudo -n systemctl restart guildkeeper
-
           sleep 10
-
-          echo "Checking service..."
           sudo -n systemctl is-active --quiet guildkeeper
 
           trap - ERR
+          rm -f "$PENDING_ENV"
 
           echo "GuildKeeper deployment successful!"
-          echo "Database backup: $BACKUP_PATH"
+          echo "Configuration and database backups created."
           EOF
