@@ -277,7 +277,7 @@ async def announce_level_up(member: discord.Member, old_rank: str, new_rank: str
     embed = discord.Embed(
         title='✦ LEVEL UP! ✦',
         description=(
-            f'**{member.display_name}** advanced from **{old_rank}** to **{new_rank}**!\\n'
+            f'**{member.display_name}** advanced from **{old_rank}** to **{new_rank}**!\n'
             f'✦ Current XP: **{xp:,}**'
         ),
         colour=discord.Colour.from_rgb(104, 163, 153),
