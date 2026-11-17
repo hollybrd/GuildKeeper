@@ -81,9 +81,12 @@ jobs:
           chmod 600 "$BACKUP_PATH"
 
           rollback() {
-            echo "Deployment failed. Restoring previous code..."
-            git reset --hard "$OLD_COMMIT"
-            sudo -n systemctl restart guildkeeper
+          echo "Deployment failed. Restoring previous code..."
+          git reset --hard "$OLD_COMMIT"
+          .venv/bin/python -m pip install -r requirements.txt
+          sudo -n systemctl restart guildkeeper
+          sleep 10
+          sudo -n systemctl is-active --quiet guildkeeper
           }
 
           trap rollback ERR
