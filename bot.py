@@ -786,10 +786,10 @@ async def admin_rank_test_reset(interaction: discord.Interaction, confirm: bool)
     await interaction.followup.send(
         '♻️ **Rank testing reset complete!** You are now **Unranked** with **0 XP**. '
         'Your Starter Quest completion, rank unlocks and one-time rank announcement '
-        'history have been reset so you can test Novice and all subsequent level-ups again.\\n\\n'
+        'history have been reset so you can test Novice and all subsequent level-ups again.\n\n'
         'Re-complete the Starter Quest and press **Turn In Quest** to unlock Guild Member + Novice. '
         'For testing, you can also use **/admin_starter_award** for starter objectives '
-        'and **/admin_xp_award** for later rank thresholds.\\n'
+        'and **/admin_xp_award** for later rank thresholds.\n'
         '**Preserved:** streak/weekly activity history, previous XP log and discount reward tickets. '
         'The saved XP balance itself has been set to 0.',
         ephemeral=True,
