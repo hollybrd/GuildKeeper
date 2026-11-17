@@ -67,6 +67,7 @@ def setup_db():
     with connect() as db:
         db.executescript('''
         CREATE TABLE IF NOT EXISTS rank_unlocks (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, rank TEXT NOT NULL, unlocked_at TEXT NOT NULL, PRIMARY KEY(guild_id,user_id,rank));
+        CREATE TABLE IF NOT EXISTS rank_high_watermarks (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, rank TEXT NOT NULL, PRIMARY KEY(guild_id,user_id));
         CREATE TABLE IF NOT EXISTS admin_streak_weeks (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, week_key TEXT NOT NULL, added_at TEXT NOT NULL, PRIMARY KEY(guild_id,user_id,week_key));
         CREATE TABLE IF NOT EXISTS members (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
           xp INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,user_id));
@@ -306,8 +307,35 @@ async def announce_level_up(member: discord.Member, old_rank: str, new_rank: str
         log.exception('Could not post level-up for member %s', member.id)
 
 
+def record_highest_rank(gid: int, uid: int, current: str, previous: str | None) -> bool:
+    """Keep a permanent highest-reached rank; return True for a new personal best.
+
+    Seed from the Discord role as well as the DB so an initial role resync
+    never produces a false celebration. Never lower the watermark on demotion.
+    """
+    rank_order = {name: i for i, (name, _) in enumerate(RANKS)}
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute(
+            'SELECT rank FROM rank_high_watermarks WHERE guild_id=? AND user_id=?',
+            (gid, uid),
+        ).fetchone()
+        baseline = row['rank'] if row else previous
+        # Existing Discord role provides a baseline for members before this feature.
+        if previous and (baseline is None or rank_order[previous] > rank_order[baseline]):
+            baseline = previous
+        personal_best = baseline is not None and rank_order[current] > rank_order[baseline]
+        highest = current if baseline is None or personal_best else baseline
+        db.execute(
+            'INSERT INTO rank_high_watermarks(guild_id,user_id,rank) VALUES (?,?,?) '
+            'ON CONFLICT(guild_id,user_id) DO UPDATE SET rank=excluded.rank',
+            (gid, uid, highest),
+        )
+    return personal_best
+
+
 async def update_rank(member: discord.Member, xp: int, announce: bool = True) -> bool:
-    """Sync the current XP rank role; announce only real promotions."""
+    """Sync rank roles and celebrate only new personal-best ranks, never repeats."""
     desired = rank_for(xp, member.guild.id, member.id)
     rank_order = {name: i for i, (name, _) in enumerate(RANKS)}
     rank_names = set(rank_order)
@@ -326,12 +354,18 @@ async def update_rank(member: discord.Member, xp: int, announce: bool = True) ->
             if target not in new_roles:
                 new_roles.append(target)
             await member.edit(roles=new_roles, reason='Guildkeeper XP rank synchronisation')
-        if announce and old_rank is not None and rank_order[desired] > rank_order[old_rank]:
-            await announce_level_up(member, old_rank, desired, xp)
-        return True
     except (discord.Forbidden, discord.HTTPException):
         log.exception('Could not update rank for member %s; check Manage Roles and role order', member.id)
         return False
+
+    try:
+        is_new_best = record_highest_rank(member.guild.id, member.id, desired, old_rank)
+    except sqlite3.Error:
+        log.exception('Could not record highest rank for member %s', member.id)
+        return True
+    if announce and is_new_best and old_rank is not None:
+        await announce_level_up(member, old_rank, desired, xp)
+    return True
 
 
 async def sync_all_ranks(guild: discord.Guild) -> tuple[int, int]:
