@@ -19,7 +19,6 @@ jobs:
       - name: Configure SSH
         env:
           SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
-          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
           ORACLE_HOST_KEY: ${{ secrets.ORACLE_HOST_KEY }}
         run: |
           mkdir -p ~/.ssh
@@ -34,30 +33,70 @@ jobs:
           ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
           ORACLE_USER: ${{ secrets.ORACLE_USER }}
         run: |
-          ssh "$ORACLE_USER@$ORACLE_HOST" 'bash -se' <<'EOF'
-          set -e
+          ssh -o StrictHostKeyChecking=yes \
+            "$ORACLE_USER@$ORACLE_HOST" 'bash -se' <<'EOF'
+          set -Eeuo pipefail
 
           cd /home/ubuntu/discord-bots/GuildKeeper
 
-          # Back up player database
-          cp guildkeeper.db "$HOME/guildkeeper-backup.db"
+          OLD_COMMIT=$(git rev-parse HEAD)
+          BACKUP_DIR="$HOME/guildkeeper-backups"
+          TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
+          mkdir -p "$BACKUP_DIR"
+          chmod 700 "$BACKUP_DIR"
 
-          # Download approved code
-          git pull --ff-only
+          echo "Backing up player database..."
 
-          # Update Python dependencies
+          BACKUP_PATH="$BACKUP_DIR/guildkeeper-$TIMESTAMP.db"
+
+          BACKUP_PATH="$BACKUP_PATH" .venv/bin/python - <<'PY'
+          import os
+          import sqlite3
+
+          source = sqlite3.connect("guildkeeper.db")
+          backup = sqlite3.connect(os.environ["BACKUP_PATH"])
+          try:
+              source.backup(backup)
+              result = backup.execute(
+                  "PRAGMA integrity_check"
+              ).fetchone()[0]
+              if result != "ok":
+                  raise RuntimeError("Backup integrity check failed")
+          finally:
+              backup.close()
+              source.close()
+
+          print("Database backup verified.")
+          PY
+
+          chmod 600 "$BACKUP_PATH"
+
+          rollback() {
+            echo "Deployment failed. Restoring previous code..."
+            git reset --hard "$OLD_COMMIT"
+            sudo -n systemctl restart guildkeeper
+          }
+
+          trap rollback ERR
+
+          echo "Downloading latest code..."
+          git pull --ff-only origin main
+
+          echo "Installing dependencies..."
           .venv/bin/python -m pip install -r requirements.txt
 
-          # Validate Python syntax
+          echo "Checking Python syntax..."
           .venv/bin/python -m py_compile bot.py
 
-          # Restart GuildKeeper
+          echo "Restarting GuildKeeper..."
           sudo -n systemctl restart guildkeeper
 
           sleep 10
 
-          # Verify service is running
           sudo -n systemctl is-active --quiet guildkeeper
 
+          trap - ERR
+
           echo "GuildKeeper deployment successful!"
+          echo "Database backup: $BACKUP_PATH"
           EOF
