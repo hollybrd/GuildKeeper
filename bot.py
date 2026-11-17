@@ -321,7 +321,17 @@ def record_highest_rank(gid: int, uid: int, current: str, previous: str | None) 
             (gid, uid),
         ).fetchone()
         baseline = row['rank'] if row else previous
-        # Existing Discord role provides a baseline for members before this feature.
+        # Older Master/Legend/Paragon unlocks existed before this feature.
+        # Treat those as already reached so regaining them never produces a repeat.
+        historic = db.execute(
+            'SELECT rank FROM rank_unlocks WHERE guild_id=? AND user_id=?',
+            (gid, uid),
+        ).fetchall()
+        for earned in historic:
+            rank = earned['rank']
+            if rank in rank_order and (baseline is None or rank_order[rank] > rank_order[baseline]):
+                baseline = rank
+        # Existing Discord role also provides a baseline for older members.
         if previous and (baseline is None or rank_order[previous] > rank_order[baseline]):
             baseline = previous
         personal_best = baseline is not None and rank_order[current] > rank_order[baseline]
