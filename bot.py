@@ -339,7 +339,6 @@ async def announce_new_guild_member(member: discord.Member) -> None:
     embed = discord.Embed(
         title='✦ New Guild Member! ✦',
         description=(
-            f'🎉 Congratulations {member.mention} — **Novice**!\n\n'
             'You have successfully joined the guild and advanced to Novice! '
             f'All channels are now unlocked. Check the {stats_link} channel any time '
             'to review your XP and progress!\n\n'
@@ -350,6 +349,7 @@ async def announce_new_guild_member(member: discord.Member) -> None:
     embed.set_thumbnail(url=member.display_avatar.url)
     try:
         await channel.send(
+            content=f'🎉 Congratulations {member.mention} — **Novice**!',
             embed=embed,
             allowed_mentions=discord.AllowedMentions(users=[member], roles=False, everyone=False),
         )
@@ -368,7 +368,6 @@ async def announce_level_up(member: discord.Member, old_rank: str, new_rank: str
     embed = discord.Embed(
         title='✦ LEVEL UP! ✦',
         description=(
-            f'🎉 Congratulations {member.mention} — **{new_rank}**!\n\n'
             f'You advanced from **{old_rank}** to **{new_rank}**!\n\n'
             f'✦ Current XP: **{xp:,}**'
         ),
@@ -390,6 +389,7 @@ async def announce_level_up(member: discord.Member, old_rank: str, new_rank: str
     embed.set_thumbnail(url=member.display_avatar.url)
     try:
         await channel.send(
+            content=f'🎉 Congratulations {member.mention} — **{new_rank}**!',
             embed=embed,
             allowed_mentions=discord.AllowedMentions(users=[member], roles=False, everyone=False),
         )
