@@ -20,6 +20,8 @@ TOKEN = os.getenv('DISCORD_TOKEN', '')
 GUILD_ID = int(os.getenv('GUILD_ID', '0'))
 QUESTS_CHANNEL_ID = int(os.getenv('QUESTS_CHANNEL_ID', '0'))
 ANNOUNCEMENTS_CHANNEL_ID = int(os.getenv('ANNOUNCEMENTS_CHANNEL_ID', '0'))
+LEVEL_UP_CHANNEL_ID = int(os.getenv('LEVEL_UP_CHANNEL_ID', '0'))
+HQ_CATEGORY_ID = int(os.getenv('HQ_CATEGORY_ID', '0'))
 TZ = ZoneInfo(os.getenv('TIMEZONE', 'Europe/London'))
 DB = Path(__file__).with_name('guildkeeper.db')
 RANKS = [('Novice', 0), ('Apprentice', 100), ('Adept', 300),
@@ -264,15 +266,58 @@ class Guildkeeper(commands.Bot):
 
 bot = Guildkeeper(command_prefix='!', intents=intents)
 
-async def update_rank(member: discord.Member, xp: int) -> bool:
-    """Make exactly the earned rank role match XP; leave class and other roles alone."""
+async def announce_level_up(member: discord.Member, old_rank: str, new_rank: str, xp: int) -> None:
+    """Celebrate genuine promotions, with HQ invitations for Master and above."""
+    if not LEVEL_UP_CHANNEL_ID:
+        return
+    channel = member.guild.get_channel(LEVEL_UP_CHANNEL_ID)
+    if not isinstance(channel, discord.TextChannel):
+        log.warning('LEVEL_UP_CHANNEL_ID is not a text channel in this Guild')
+        return
+    embed = discord.Embed(
+        title='✦ LEVEL UP! ✦',
+        description=(
+            f'**{member.display_name}** advanced from **{old_rank}** to **{new_rank}**!\\n'
+            f'✦ Current XP: **{xp:,}**'
+        ),
+        colour=discord.Colour.from_rgb(104, 163, 153),
+    )
+    if new_rank in {'Master', 'Legend', 'Paragon'}:
+        hq = member.guild.get_channel(HQ_CATEGORY_ID) if HQ_CATEGORY_ID else None
+        destination = hq.mention if isinstance(hq, discord.CategoryChannel) else '**✦ GYMGUILD HQ ✦**'
+        embed.add_field(
+            name='🔐 GYMGUILD HQ UNLOCKED',
+            value=(
+                f'Your new rank gives you access to {destination}! '
+                'Help shape upcoming products through exclusive previews, surveys '
+                'and design discussions. HQ access lasts while your current rank '
+                'is Master or higher.'
+            ),
+            inline=False,
+        )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    try:
+        await channel.send(
+            content=f'🎉 Congratulations {member.mention} — **{new_rank}**!',
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(users=[member], roles=False, everyone=False),
+        )
+    except (discord.Forbidden, discord.HTTPException):
+        log.exception('Could not post level-up for member %s', member.id)
+
+
+async def update_rank(member: discord.Member, xp: int, announce: bool = True) -> bool:
+    """Sync the current XP rank role; announce only real promotions."""
     desired = rank_for(xp, member.guild.id, member.id)
-    rank_names = {name for name, _ in RANKS}
+    rank_order = {name: i for i, (name, _) in enumerate(RANKS)}
+    rank_names = set(rank_order)
     roles = {role.name: role for role in member.guild.roles if role.name in rank_names}
     target = roles.get(desired)
     if target is None:
         log.warning('Missing Discord rank role %s; create it in Server Settings > Roles', desired)
         return False
+    previous = [role.name for role in member.roles if role.name in rank_names]
+    old_rank = max(previous, key=rank_order.get) if previous else None
     old = [role for role in member.roles if role.name in rank_names and role != target]
     try:
         # One edit avoids a temporary gap between removing and adding ranks.
@@ -281,6 +326,8 @@ async def update_rank(member: discord.Member, xp: int) -> bool:
             if target not in new_roles:
                 new_roles.append(target)
             await member.edit(roles=new_roles, reason='Guildkeeper XP rank synchronisation')
+        if announce and old_rank is not None and rank_order[desired] > rank_order[old_rank]:
+            await announce_level_up(member, old_rank, desired, xp)
         return True
     except (discord.Forbidden, discord.HTTPException):
         log.exception('Could not update rank for member %s; check Manage Roles and role order', member.id)
@@ -293,7 +340,7 @@ async def sync_all_ranks(guild: discord.Guild) -> tuple[int, int]:
     async for member in guild.fetch_members(limit=None):
         if member.bot:
             continue
-        if await update_rank(member, get_xp(guild.id, member.id)):
+        if await update_rank(member, get_xp(guild.id, member.id), announce=False):
             updated += 1
         else:
             failed += 1
@@ -379,7 +426,7 @@ async def admin_spawnpoint_test(interaction: discord.Interaction, member: discor
 async def on_member_join(member: discord.Member):
     if member.guild.id == GUILD_ID and not member.bot:
         await send_spawnpoint_welcome(member)
-        await update_rank(member, get_xp(member.guild.id, member.id))
+        await update_rank(member, get_xp(member.guild.id, member.id), announce=False)
         current_roles = {r.id for r in member.roles}
         if GYM_ROLE_IDS and current_roles & GYM_ROLE_IDS:
             await award_starter(member,'class')
