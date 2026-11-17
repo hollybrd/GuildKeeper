@@ -279,6 +279,37 @@ class Guildkeeper(commands.Bot):
 
 bot = Guildkeeper(command_prefix='!', intents=intents)
 
+async def announce_new_guild_member(member: discord.Member) -> None:
+    """Welcome members only after their completed starter quest unlocks the Guild."""
+    if not LEVEL_UP_CHANNEL_ID:
+        return
+    channel = member.guild.get_channel(LEVEL_UP_CHANNEL_ID)
+    if not isinstance(channel, discord.TextChannel):
+        log.warning('LEVEL_UP_CHANNEL_ID is not a text channel in this Guild')
+        return
+    stats = discord.utils.get(member.guild.text_channels, name='stats-and-streaks')
+    stats_link = stats.mention if stats else '#stats-and-streaks'
+    embed = discord.Embed(
+        title='✦ New Guild Member! ✦',
+        description=(
+            f'🎉 Congratulations {member.mention} — **Novice**!\n\n'
+            'You have successfully joined the guild and advanced to Novice! '
+            f'All channels are now unlocked. Check the {stats_link} channel any time '
+            'to review your XP and progress!\n\n'
+            f'✦ Current XP: **{get_xp(member.guild.id, member.id):,}**'
+        ),
+        colour=discord.Colour.from_rgb(104, 163, 153),
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    try:
+        await channel.send(
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(users=[member], roles=False, everyone=False),
+        )
+    except (discord.Forbidden, discord.HTTPException):
+        log.exception('Could not post new Guild Member announcement for %s', member.id)
+
+
 async def announce_level_up(member: discord.Member, old_rank: str, new_rank: str, xp: int) -> None:
     """Celebrate genuine promotions, with HQ invitations for Master and above."""
     if not LEVEL_UP_CHANNEL_ID:
@@ -1078,7 +1109,8 @@ class StarterTurnInView(discord.ui.View):
             return await interaction.followup.send(
                 'Your quest is complete, but the access role is not configured. '
                 'Please contact an admin.', ephemeral=True)
-        if role not in member.roles:
+        newly_granted = role not in member.roles
+        if newly_granted:
             try:
                 await member.add_roles(role, reason='Completed and turned in all Starter Quest objectives')
             except (discord.Forbidden, discord.HTTPException):
@@ -1087,8 +1119,12 @@ class StarterTurnInView(discord.ui.View):
                     'Your quest is complete, but I could not unlock your channels. '
                     'Please contact an admin.', ephemeral=True)
         with connect() as db:
-            db.execute('INSERT OR IGNORE INTO starter_turnins VALUES (?,?,?)',
-                       (GUILD_ID, member.id, utc_now().isoformat()))
+            inserted = db.execute('INSERT OR IGNORE INTO starter_turnins VALUES (?,?,?)',
+                                  (GUILD_ID, member.id, utc_now().isoformat())).rowcount > 0
+        # Only the original successful starter turn-in announces Novice;
+        # role restoration, duplicate clicks and old completed quests stay quiet.
+        if newly_granted and inserted:
+            await announce_new_guild_member(member)
         await interaction.followup.send(
             '🎉 **Welcome to the Guild!** All five Starter Quest objectives are complete, and all channels are unlocked.\n\n'
             '🔔 **Would you like to enable Guild Blast?** This optional role is used by admins and the Guildkeeper app in #announcements. '
