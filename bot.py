@@ -24,7 +24,7 @@ LEVEL_UP_CHANNEL_ID = int(os.getenv('LEVEL_UP_CHANNEL_ID', '0'))
 HQ_CATEGORY_ID = int(os.getenv('HQ_CATEGORY_ID', '0'))
 TZ = ZoneInfo(os.getenv('TIMEZONE', 'Europe/London'))
 DB = Path(__file__).with_name('guildkeeper.db')
-RANKS = [('Novice', 0), ('Apprentice', 100), ('Adept', 300),
+RANKS = [('Novice', 50), ('Apprentice', 100), ('Adept', 300),
          ('Expert', 600), ('Master', 1000), ('Legend', 2500),
          ('Paragon', 5000)]
 TRAINING_LOG_CHANNEL_ID = int(os.getenv('TRAINING_LOG_CHANNEL_ID', '0'))
@@ -223,7 +223,7 @@ def rank_for(xp, guild_id=None, user_id=None):
     for name, threshold in reversed(RANKS):
         if xp >= threshold and (name not in STREAK_REQUIREMENTS or name in unlocked):
             return name
-    return 'Novice'
+    return 'Unranked'
 
 
 def lifetime_objectives(guild_id: int, user_id: int) -> int:
@@ -383,8 +383,12 @@ async def update_rank(member: discord.Member, xp: int, announce: bool = True) ->
     rank_order = {name: i for i, (name, _) in enumerate(RANKS)}
     rank_names = set(rank_order)
     roles = {role.name: role for role in member.guild.roles if role.name in rank_names}
-    target = roles.get(desired)
-    if target is None:
+    member_access = member.guild.get_role(STARTER_ACCESS_ROLE_ID) if STARTER_ACCESS_ROLE_ID else None
+    # Starter Quest role is the gate: newcomers remain unranked, even if
+    # they have earned XP from starter objectives before turning the quest in.
+    qualified = member_access is not None and member_access in member.roles
+    target = roles.get(desired) if qualified else None
+    if qualified and desired != 'Unranked' and target is None:
         log.warning('Missing Discord rank role %s; create it in Server Settings > Roles', desired)
         return False
     previous = [role.name for role in member.roles if role.name in rank_names]
@@ -392,15 +396,18 @@ async def update_rank(member: discord.Member, xp: int, announce: bool = True) ->
     old = [role for role in member.roles if role.name in rank_names and role != target]
     try:
         # One edit avoids a temporary gap between removing and adding ranks.
-        if old or target not in member.roles:
+        if old or (target is not None and target not in member.roles):
             new_roles = [role for role in member.roles if role not in old]
-            if target not in new_roles:
+            if target is not None and target not in new_roles:
                 new_roles.append(target)
             await member.edit(roles=new_roles, reason='Guildkeeper XP rank synchronisation')
     except (discord.Forbidden, discord.HTTPException):
         log.exception('Could not update rank for member %s; check Manage Roles and role order', member.id)
         return False
 
+    # No rank history/announcements until the starter access role is granted.
+    if target is None:
+        return True
     try:
         is_new_best = record_highest_rank(member.guild.id, member.id, desired, old_rank)
     except sqlite3.Error:
@@ -1118,6 +1125,9 @@ class StarterTurnInView(discord.ui.View):
                 return await interaction.followup.send(
                     'Your quest is complete, but I could not unlock your channels. '
                     'Please contact an admin.', ephemeral=True)
+        # The member now has starter access; grant the earned XP rank.
+        # Novice is 50 XP (five starter objectives, 10 XP each).
+        await update_rank(member, get_xp(GUILD_ID, member.id), announce=False)
         with connect() as db:
             inserted = db.execute('INSERT OR IGNORE INTO starter_turnins VALUES (?,?,?)',
                                   (GUILD_ID, member.id, utc_now().isoformat())).rowcount > 0
