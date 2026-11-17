@@ -123,6 +123,18 @@ def setup_db():
         CREATE TABLE IF NOT EXISTS schedule_posts (guild_id INTEGER NOT NULL, post_key TEXT NOT NULL,
           PRIMARY KEY(guild_id,post_key));
         ''')
+        # Seed historic high-rank achievements before any new rank is awarded.
+        # Keep the highest existing watermark on subsequent bot restarts.
+        historic = db.execute(
+            'SELECT guild_id, user_id, rank FROM rank_unlocks '
+            "WHERE rank IN ('Master', 'Legend', 'Paragon') "
+            "ORDER BY CASE rank WHEN 'Paragon' THEN 3 WHEN 'Legend' THEN 2 ELSE 1 END DESC"
+        ).fetchall()
+        for earned in historic:
+            db.execute(
+                'INSERT OR IGNORE INTO rank_high_watermarks(guild_id,user_id,rank) VALUES (?,?,?)',
+                (earned['guild_id'], earned['user_id'], earned['rank']),
+            )
         columns = {r['name'] for r in db.execute('PRAGMA table_info(reward_tickets)')}
         for col in ('closed_at', 'closed_by', 'close_reason'):
             if col not in columns:
@@ -321,16 +333,6 @@ def record_highest_rank(gid: int, uid: int, current: str, previous: str | None) 
             (gid, uid),
         ).fetchone()
         baseline = row['rank'] if row else previous
-        # Older Master/Legend/Paragon unlocks existed before this feature.
-        # Treat those as already reached so regaining them never produces a repeat.
-        historic = db.execute(
-            'SELECT rank FROM rank_unlocks WHERE guild_id=? AND user_id=?',
-            (gid, uid),
-        ).fetchall()
-        for earned in historic:
-            rank = earned['rank']
-            if rank in rank_order and (baseline is None or rank_order[rank] > rank_order[baseline]):
-                baseline = rank
         # Existing Discord role also provides a baseline for older members.
         if previous and (baseline is None or rank_order[previous] > rank_order[baseline]):
             baseline = previous
