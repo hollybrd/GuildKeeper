@@ -24,8 +24,8 @@ LEVEL_UP_CHANNEL_ID = int(os.getenv('LEVEL_UP_CHANNEL_ID', '0'))
 HQ_CATEGORY_ID = int(os.getenv('HQ_CATEGORY_ID', '0'))
 TZ = ZoneInfo(os.getenv('TIMEZONE', 'Europe/London'))
 DB = Path(__file__).with_name('guildkeeper.db')
-RANKS = [('Novice', 50), ('Apprentice', 100), ('Adept', 300),
-         ('Expert', 600), ('Master', 1000), ('Legend', 2500),
+RANKS = [('Novice', 50), ('Apprentice', 300), ('Adept', 500),
+         ('Expert', 750), ('Master', 1000), ('Legend', 2500),
          ('Paragon', 5000)]
 TRAINING_LOG_CHANNEL_ID = int(os.getenv('TRAINING_LOG_CHANNEL_ID', '0'))
 GYM_CATEGORY_ID = int(os.getenv('GYM_CATEGORY_ID', '0'))
