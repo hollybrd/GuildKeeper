@@ -725,6 +725,77 @@ async def admin_streak_add(interaction: discord.Interaction, member: discord.Mem
         f'Rank: **{rank_for(get_xp(interaction.guild_id,member.id),interaction.guild_id,member.id)}**. '
         'No XP or quest objectives were awarded.', ephemeral=True)
 
+def reset_rank_test_data(gid: int, uid: int) -> None:
+    """Reset rank/onboarding progression for testing, retaining other player records.
+
+    Keeps XP history, quest/activity evidence, streaks and reward tickets as
+    audit records; removes stored XP, starter claims/turn-in, earned rank
+    unlocks and the announcement high watermark.
+    """
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        db.execute('INSERT OR IGNORE INTO members(guild_id,user_id,xp) VALUES (?,?,0)', (gid, uid))
+        db.execute('UPDATE members SET xp=0 WHERE guild_id=? AND user_id=?', (gid, uid))
+        for table in ('starter_claims', 'starter_turnins', 'rank_unlocks', 'rank_high_watermarks'):
+            db.execute(f'DELETE FROM {table} WHERE guild_id=? AND user_id=?', (gid, uid))
+
+
+@bot.tree.command(name='admin_rank_test_reset',
+                  description='Admin testing: reset your XP, ranks and one-time level-up history')
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(confirm='Confirm permanent reset of YOUR XP and Starter Quest for testing')
+async def admin_rank_test_reset(interaction: discord.Interaction, confirm: bool):
+    """Reset only the invoking moderator; never reset other members by accident."""
+    if interaction.guild_id != GUILD_ID or not isinstance(interaction.user, discord.Member):
+        return await interaction.response.send_message('Use this in the GYMGUILD server.', ephemeral=True)
+    if not confirm:
+        return await interaction.response.send_message(
+            'No changes made. Set **confirm: True** to reset your XP to 0, '
+            'clear your rank/starter progression and replay first-time level-ups. '
+            'Existing streaks, other quest history and rank reward tickets are preserved.',
+            ephemeral=True,
+        )
+    member = interaction.user
+    rank_names = {name for name, _ in RANKS}
+    to_remove = [role for role in member.roles if role.name in rank_names or
+                 (STARTER_ACCESS_ROLE_ID and role.id == STARTER_ACCESS_ROLE_ID)]
+    await interaction.response.defer(ephemeral=True)
+    try:
+        if to_remove:
+            await member.remove_roles(
+                *to_remove, reason='Moderator self-reset for GuildKeeper rank announcement testing',
+                atomic=True,
+            )
+    except (discord.Forbidden, discord.HTTPException):
+        log.exception('Could not remove test rank/access roles for member %s', member.id)
+        return await interaction.followup.send(
+            'Reset cancelled: GuildKeeper could not remove your rank/Guild Member roles. '
+            'Check Manage Roles and role hierarchy. Your XP and unlock history were not changed.',
+            ephemeral=True,
+        )
+    try:
+        reset_rank_test_data(interaction.guild_id, member.id)
+    except sqlite3.Error:
+        log.exception('Rank test reset database failure for member %s', member.id)
+        return await interaction.followup.send(
+            'Your roles were removed but the database reset failed. '
+            'Do not earn XP yet; check the GuildKeeper logs and run the rank sync after fixing the error.',
+            ephemeral=True,
+        )
+    await interaction.followup.send(
+        '♻️ **Rank testing reset complete!** You are now **Unranked** with **0 XP**. '
+        'Your Starter Quest completion, rank unlocks and one-time rank announcement '
+        'history have been reset so you can test Novice and all subsequent level-ups again.\\n\\n'
+        'Re-complete the Starter Quest and press **Turn In Quest** to unlock Guild Member + Novice. '
+        'For testing, you can also use **/admin_starter_award** for starter objectives '
+        'and **/admin_xp_award** for later rank thresholds.\\n'
+        '**Preserved:** streak/weekly activity history, previous XP log and discount reward tickets. '
+        'The saved XP balance itself has been set to 0.',
+        ephemeral=True,
+    )
+
+
 @bot.tree.command(name='admin_xp_award', description='Moderator: award bonus XP to a member')
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.checks.has_permissions(manage_guild=True)
