@@ -270,7 +270,7 @@ def streak_blocked_rank_notice(gid: int, uid: int, xp: int) -> str:
         'Paused weeks protect your streak but do not increase it. '
         'Once a rank is unlocked, you won\'t need to repeat its streak requirement.'
     )
-    return '\\n'.join(lines)
+    return '\n'.join(lines)
 
 
 def lifetime_objectives(guild_id: int, user_id: int) -> int:
