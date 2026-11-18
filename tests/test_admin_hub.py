@@ -286,7 +286,7 @@ class CheatImprovementsTests(unittest.TestCase):
         self.assertEqual(len(guide.fields), 4)
         self.assertIn('/admin_milestone_test_reset', guide.fields[2].value)
         self.assertIn('/admin_streak_add', guide.fields[1].value)
-        self.assertIn('\\n', guide.fields[0].value)
+        self.assertIn('\n', guide.fields[0].value)
 
     def test_only_reward_is_blue_on_player_hub(self):
         from discord import ButtonStyle
