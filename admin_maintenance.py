@@ -6,6 +6,7 @@ All decisions are recorded for the private Admin Hub Health Check.
 """
 import json
 import logging
+from datetime import datetime, timezone
 
 import panel_health
 
@@ -56,6 +57,19 @@ def job_statuses(api):
         except (ValueError, TypeError):
             pass
     return statuses
+
+
+
+def needs_periodic_check(api, hours=6):
+    """Avoid running the expensive live panel scan every scheduler minute."""
+    previous = last_report(api)
+    if previous is None:
+        return True
+    try:
+        previous_time = datetime.fromisoformat(previous['timestamp'])
+        return (api.utc_now() - previous_time).total_seconds() >= hours * 3600
+    except (ValueError, KeyError, TypeError):
+        return True
 
 
 async def reconcile(api, guild):
