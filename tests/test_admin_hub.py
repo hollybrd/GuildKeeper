@@ -26,9 +26,9 @@ class AdminHubTests(unittest.TestCase):
         self.assertTrue(view.is_persistent())
         self.assertEqual(
             [item.label for item in view.children],
-            ['Players', 'Quests', 'Rewards & Orders',
-             'Announcements', 'Audit Log', 'Bot Controls'])
-        self.assertEqual([item.row for item in view.children], [0,0,0,1,1,1])
+            ['Players', 'Rewards & Orders', 'Announcements',
+             'Audit Log', 'Bot Controls'])
+        self.assertEqual([item.row for item in view.children], [0,0,0,1,1])
 
     def test_admin_only_permission_policy(self):
         def interaction(gid, manage):

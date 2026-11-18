@@ -54,13 +54,6 @@ class AdminHubView(discord.ui.View):
             '👥 **Manage Players** — choose a member to inspect or adjust their XP.',
             view=PlayerPickerView(interaction.user.id), ephemeral=True)
 
-    @discord.ui.button(label='Quests', emoji='📜', style=discord.ButtonStyle.secondary,
-                       custom_id='guildkeeper:adminhub:quests', row=0)
-    async def quests(self, interaction, button):
-        await interaction.response.send_message(
-            '📜 **Manage Quests** — view weekly status or refresh the board.',
-            view=QuestMenu(interaction.user.id), ephemeral=True)
-
     @discord.ui.button(label='Rewards & Orders', emoji='🎟️', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:adminhub:rewards', row=0)
     async def rewards(self, interaction, button):
@@ -68,7 +61,7 @@ class AdminHubView(discord.ui.View):
             reward_summary(), view=RewardMenu(interaction.user.id), ephemeral=True)
 
     @discord.ui.button(label='Announcements', emoji='📣', style=discord.ButtonStyle.secondary,
-                       custom_id='guildkeeper:adminhub:announcements', row=1)
+                       custom_id='guildkeeper:adminhub:announcements', row=0)
     async def announcements(self, interaction, button):
         await interaction.response.send_message(
             '📣 **Announcements** — compose, preview and confirm a one-off announcement. '
@@ -97,7 +90,6 @@ def hub_embed():
         colour=0x71A7A2)
     for title, description in (
         ('👥 Players', 'Choose a member, check their progress, award or remove XP.'),
-        ('📜 Quests', 'Inspect weekly quests, refresh the weekly board and locate Milestones.'),
         ('🎟️ Rewards & Orders', 'Review outstanding requests in the existing moderator channel.'),
         ('📣 Announcements', 'Compose, preview and publish without pings.'),
         ('📋 Audit Log', 'Inspect Admin Hub changes.'),
@@ -234,54 +226,6 @@ class ConfirmXP(PrivateMenu):
     async def cancel(self, interaction, button):
         self.used = True
         await interaction.response.edit_message(content='XP change cancelled.', view=None)
-
-
-class QuestMenu(PrivateMenu):
-    @discord.ui.button(label='Weekly Status', emoji='📋', style=discord.ButtonStyle.secondary)
-    async def weekly(self, interaction, button):
-        channel = interaction.guild.get_channel(api.QUESTS_CHANNEL_ID)
-        await interaction.response.edit_message(
-            content='📜 **Weekly Quest**\nWeek: ' + api.week_key()
-                    + '\nNext reset: <t:' + str(int(api.next_reset().timestamp())) + ':F>'
-                    + '\nBoard channel: ' + (channel.mention if channel else 'Not configured'),
-            view=self)
-
-    @discord.ui.button(label='Post Weekly Board', emoji='🔄', style=discord.ButtonStyle.primary)
-    async def post_weekly(self, interaction, button):
-        await interaction.response.send_message(
-            '⚠️ This will post a Weekly Side Quest board in the public quests channel. Continue?',
-            view=ConfirmWeeklyBoard(self.owner_id), ephemeral=True)
-
-    @discord.ui.button(label='Milestone Board', emoji='🏆', style=discord.ButtonStyle.secondary)
-    async def milestone(self, interaction, button):
-        await interaction.response.edit_message(
-            content='🏆 **Milestone Quests**\n' + api.milestone_board_link(interaction.guild)
-                    + '\nExisting approval and milestone buttons remain unchanged.',
-            view=self)
-
-
-class ConfirmWeeklyBoard(PrivateMenu):
-    def __init__(self, owner_id):
-        super().__init__(owner_id)
-        self.used = False
-
-    @discord.ui.button(label='Confirm Post', emoji='✅', style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction, button):
-        if self.used:
-            return await interaction.response.send_message('Already processed.', ephemeral=True)
-        self.used = True
-        await interaction.response.defer(ephemeral=True)
-        channel = interaction.guild.get_channel(api.QUESTS_CHANNEL_ID)
-        if not isinstance(channel, discord.TextChannel):
-            return await interaction.edit_original_response(content='Quest channel not configured.', view=None)
-        await api.post_weekly_board(force=True)
-        audit(interaction.user.id, 'weekly_board', 'Requested weekly board in channel ' + str(channel.id))
-        await interaction.edit_original_response(content='✅ Weekly board requested in ' + channel.mention, view=None)
-
-    @discord.ui.button(label='Cancel', emoji='✖️', style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction, button):
-        self.used = True
-        await interaction.response.edit_message(content='No board posted.', view=None)
 
 
 def reward_summary():
