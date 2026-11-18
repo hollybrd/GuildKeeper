@@ -7,6 +7,7 @@ separately configured limited-scope Shopify Admin app on Oracle.
 import os
 import re
 import secrets
+import time
 from datetime import timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote, urlparse
@@ -45,16 +46,56 @@ def public_domain():
 
 
 def admin_configured():
-    return bool(os.getenv("SHOPIFY_ADMIN_DOMAIN") and os.getenv("SHOPIFY_ADMIN_TOKEN"))
+    return bool(os.getenv('SHOPIFY_ADMIN_DOMAIN') and (
+        os.getenv('SHOPIFY_ADMIN_TOKEN') or (
+            os.getenv('SHOPIFY_CLIENT_ID') and os.getenv('SHOPIFY_CLIENT_SECRET'))))
 
 
 def admin_endpoint():
     domain = os.getenv("SHOPIFY_ADMIN_DOMAIN", "").strip().lower()
     if not domain.endswith(".myshopify.com") or not SAFE_DOMAIN.fullmatch(domain):
         raise ShopifyUnavailable("Configure SHOPIFY_ADMIN_DOMAIN to your store's .myshopify.com address.")
-    if not os.getenv("SHOPIFY_ADMIN_TOKEN"):
-        raise ShopifyUnavailable("Configure SHOPIFY_ADMIN_TOKEN securely on the Oracle deployment.")
+    if not admin_configured():
+        raise ShopifyUnavailable("Configure Shopify Client ID and Client Secret in Oracle deployment secrets.")
     return f"https://{domain}/admin/api/{API_VERSION}/graphql.json"
+
+
+# Client-credentials access tokens for new Shopify Dev Dashboard custom apps
+# expire after roughly 24 hours. Never persist them in Git or the database.
+_token = None
+_token_until = 0.0
+
+
+async def admin_token():
+    global _token, _token_until
+    legacy = os.getenv("SHOPIFY_ADMIN_TOKEN")
+    if legacy:
+        return legacy
+    domain = os.getenv("SHOPIFY_ADMIN_DOMAIN", "").strip().lower()
+    # Reuse the exact domain validation of admin_endpoint().
+    admin_endpoint()
+    client_id = os.getenv("SHOPIFY_CLIENT_ID")
+    client_secret = os.getenv("SHOPIFY_CLIENT_SECRET")
+    if not (client_id and client_secret):
+        raise ShopifyUnavailable("Client ID and Client Secret are not configured.")
+    if _token is not None and time.monotonic() < _token_until:
+        return _token
+    url = f"https://{domain}/admin/oauth/access_token"
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+        async with session.post(url, data={
+            "client_id": client_id, "client_secret": client_secret,
+            "grant_type": "client_credentials",
+        }, allow_redirects=False) as response:
+            if response.status != 200:
+                raise ShopifyUnavailable("Shopify authentication failed. Check the app installation and credentials.")
+            data = await response.json()
+    access_token = data.get("access_token")
+    expires_in = data.get("expires_in")
+    if not isinstance(access_token, str) or not access_token or not isinstance(expires_in, (int,float)):
+        raise ShopifyUnavailable("Shopify authentication returned an invalid token response.")
+    _token, _token_until = access_token, time.monotonic() + max(0, expires_in - 120)
+    return _token
+
 
 
 async def catalog(limit=30):
@@ -104,7 +145,7 @@ async def catalog(limit=30):
 
 async def graphql(query,variables):
     url=admin_endpoint()
-    token=os.environ["SHOPIFY_ADMIN_TOKEN"]
+    token=await admin_token()
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
         async with session.post(url,headers={
             "X-Shopify-Access-Token":token,"Content-Type":"application/json"},
