@@ -39,7 +39,7 @@ def ensure_tables():
 # Build the public shop's main message, including its buttons and explanation.
 def shop_embed():
     e=discord.Embed(
-        title="✦ GYMGUILD — THE GUILD SHOP",
+        title="✦ GYMGUILD  -  THE GUILD SHOP",
         description="Where culture meets strength.\n\n"
                     "**Browse the latest GYMGUILD kit** without leaving Discord. "
                     "Choose a product to see its price and design, then shop securely at "
@@ -121,7 +121,7 @@ async def browse(interaction,mode="all"):
     await interaction.followup.send(
         "🛍️ **" + ("Sale products" if mode=="sale" else
                    "New arrivals" if mode=="new" else "GYMGUILD products")
-        + "** — select one to see its live product card.",
+        + "**  -  select one to see its live product card.",
         view=ProductMenu(items),ephemeral=True)
 
 
