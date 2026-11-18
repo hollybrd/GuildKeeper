@@ -343,6 +343,10 @@ def bot_dms_enabled(gid, uid):
 
 def set_bot_dms(gid, uid, enabled):
     with connect() as db:
+        # Don't release old Inbox alerts as a DM backlog when a member opts in again.
+        db.execute('UPDATE player_notifications SET dm_sent_at=? '
+                   'WHERE guild_id=? AND user_id=? AND dm_sent_at IS NULL',
+                   (utc_now().isoformat(),gid,uid))
         db.execute('INSERT INTO notification_preferences VALUES (?,?,?) '
                    'ON CONFLICT(guild_id,user_id) DO UPDATE SET dm_enabled=excluded.dm_enabled',
                    (gid,uid,int(enabled)))
@@ -390,7 +394,7 @@ async def deliver_notifications():
     with connect() as db:
         rows = db.execute('SELECT n.id,n.user_id,n.title,n.body FROM player_notifications n '
                           'LEFT JOIN notification_preferences p ON p.guild_id=n.guild_id AND p.user_id=n.user_id '
-                          'WHERE n.guild_id=? AND n.dm_sent_at IS NULL AND COALESCE(p.dm_enabled,1)=1 '
+                          'WHERE n.guild_id=? AND n.category IN ('xp_loss','streak') AND n.dm_sent_at IS NULL AND COALESCE(p.dm_enabled,1)=1 '
                           'ORDER BY n.id LIMIT 40',(GUILD_ID,)).fetchall()
     for r in rows:
         # Mark first to ensure retries do not spam members whose privacy settings change.
