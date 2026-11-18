@@ -66,7 +66,7 @@ class AdminHubView(discord.ui.View):
                        custom_id='guildkeeper:adminhub:players', row=0)
     async def players(self, interaction, button):
         await interaction.response.send_message(
-            '👥 **Manage Players** — choose a member to inspect or adjust their XP.',
+            '👥 **Manage Players**  -  choose a member to inspect or adjust their XP.',
             view=PlayerPickerView(interaction.user.id), ephemeral=True)
 
     @discord.ui.button(label='Rewards & Orders', emoji='🎟️', style=discord.ButtonStyle.secondary,
@@ -79,7 +79,7 @@ class AdminHubView(discord.ui.View):
                        custom_id='guildkeeper:adminhub:announcements', row=0)
     async def announcements(self, interaction, button):
         await interaction.response.send_message(
-            '📣 **Announcements** — post now, schedule one-off/recurring messages, '
+            '📣 **Announcements**  -  post now, schedule one-off/recurring messages, '
             'and manage automatic notifications.', view=AnnouncementMenu(interaction.user.id),
             ephemeral=True)
 
@@ -108,7 +108,7 @@ class AdminHubView(discord.ui.View):
 
 def hub_embed():
     embed = discord.Embed(
-        title='✦ GUILDKEEPER — ADMIN HUB',
+        title='✦ GUILDKEEPER  -  ADMIN HUB',
         description='Private moderator controls. Choose an area below; sensitive actions require confirmation. '
                     'Existing admin slash commands remain available as backups.',
         colour=0x71A7A2)
@@ -292,7 +292,7 @@ class AnnouncementMenu(PrivateMenu):
     @discord.ui.button(label='Schedule Message', emoji='📅', style=discord.ButtonStyle.primary)
     async def schedule(self, interaction, button):
         await interaction.response.send_message(
-            '📅 **Schedule an announcement** — choose its destination channel first.',
+            '📅 **Schedule an announcement**  -  choose its destination channel first.',
             view=announcement_ui.ChooseChannel(self.owner_id), ephemeral=True)
 
     @discord.ui.button(label='Upcoming Messages', emoji='📋', style=discord.ButtonStyle.secondary)
@@ -392,14 +392,14 @@ def audit_summary(category='all'):
             return any(part in action for part in ('reward', 'order'))
         rows = [row for row in rows if matches(row)]
     if not rows:
-        return '📋 **Admin Audit — ' + category.title() + '**\nNo matching recorded Admin Hub changes yet.'
-    lines = ['📋 **Admin Audit — ' + category.title() + '** (latest 10)']
+        return '📋 **Admin Audit  -  ' + category.title() + '**\nNo matching recorded Admin Hub changes yet.'
+    lines = ['📋 **Admin Audit  -  ' + category.title() + '** (latest 10)']
     for row in rows[:10]:
         detail = discord.utils.escape_mentions(row['details'])[:160]
         target = (' · target ' + str(row['target_id'])) if row['target_id'] else ''
         lines.append('**' + row['created_at'][:16].replace('T', ' ') + ' UTC**'
                      + ' · moderator ' + str(row['actor_id']) + target
-                     + '\n**' + row['action'].replace('_', ' ').title() + '** — ' + detail)
+                     + '\n**' + row['action'].replace('_', ' ').title() + '**  -  ' + detail)
     return '\n'.join(lines)[:1900]
 
 
@@ -504,7 +504,7 @@ def shopify_status():
     return ('🛍️ **GYMGUILD Shopify Integration**\n'
             '**Store:** https://gymguild.co.uk\n'
             '**Discord Shop:** '+("Posted in <#"+row["value"].split(":")[0]+">" if row else
-                                    "Not posted — choose a channel below")+'\n'
+                                    "Not posted  -  choose a channel below")+'\n'
             '**Products:** Public Shopify storefront feed\n'
             '**Order checks & codes:** '+("Admin API configured" if configured
                                           else "Admin API credentials needed")+'\n'
