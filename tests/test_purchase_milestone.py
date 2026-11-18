@@ -388,6 +388,23 @@ class PurchaseMilestoneTests(unittest.TestCase):
         self.assertEqual(bot.award_earned_streak_milestones(self.gid, self.uid), ['streak4'])
         self.assertEqual(bot.get_xp(self.gid, self.uid), 75)
 
+    def test_reset_does_not_reimport_historical_order_on_restart(self):
+        with bot.connect() as db:
+            db.execute(
+                'INSERT INTO pending_milestones(guild_id,user_id,kind,evidence,status,created_at) '
+                "VALUES (?,?, 'purchase1', ?, 'pending', ?)",
+                (self.gid, self.uid, '#historic1001', bot.utc_now().isoformat()),
+            )
+        bot.setup_db()
+        self.assertEqual(bot.order_submission_status(self.gid, self.uid), 'pending')
+        self.assertEqual(bot.reset_milestone_test_data(
+            self.gid, self.uid, 'order')['orders_archived'], 1)
+        bot.setup_db()
+        self.assertEqual(bot.order_submission_status(self.gid, self.uid), 'available')
+        self.assertEqual(bot.purchase_order_summary(self.gid, self.uid)['pending'], 0)
+        self.assertEqual(bot.submit_purchase_order(
+            self.gid, self.uid, '#historic1001')[0], 'submitted')
+
     def test_admin_reset_order_reverses_xp_preserves_audit_and_can_retest_same_reference(self):
         other = self.uid + 1
         status, order_id = bot.submit_purchase_order(self.gid, self.uid, '#9001')
