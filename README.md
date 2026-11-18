@@ -1,4 +1,4 @@
-# GYMGUILD ✦ GuildKeeper — Start Here
+# GYMGUILD ✦ GuildKeeper  -  Start Here
 
 GuildKeeper is the Discord community bot for GYMGUILD. It runs continuously on an Oracle server, remembers member progress in **SQLite**, and interacts with Discord and (optionally) Shopify.
 
@@ -62,7 +62,7 @@ EVERY MINUTE: bot.py scheduler --> announcement / notification / maintenance job
 
 ## Follow a member action end-to-end
 
-### Example A — a member posts eligible training proof
+### Example A  -  a member posts eligible training proof
 
 1. `bot.py → on_message()` receives the message.
 2. The post is classified according to the rules and channel.
@@ -71,7 +71,7 @@ EVERY MINUTE: bot.py scheduler --> announcement / notification / maintenance job
 5. The player sees updated progress in the Player Hub and possibly an Inbox event.
 6. When all four objectives are done, the weekly bonus is awarded once.
 
-### Example B — a moderator adjusts XP
+### Example B  -  a moderator adjusts XP
 
 1. `admin_hub.py → AdminHubView` opens a staff-only panel.
 2. The moderator selects a member and enters an amount and reason.
@@ -79,7 +79,7 @@ EVERY MINUTE: bot.py scheduler --> announcement / notification / maintenance job
 4. The confirmed change calls the shared `bot.py` XP logic and updates Discord rank roles.
 5. `admin_hub_audit` remembers who made the change and why.
 
-### Example C — a Shopify reward is claimed
+### Example C  -  a Shopify reward is claimed
 
 1. A player unlocks an eligible rank and opens their private reward ticket.
 2. A moderator clicks **Generate Shopify Code**, then confirms.
@@ -88,7 +88,7 @@ EVERY MINUTE: bot.py scheduler --> announcement / notification / maintenance job
 5. The code is delivered in the existing private ticket and the reward is recorded as fulfilled.
 6. If Shopify's outcome is uncertain, GuildKeeper does **not** silently create a second code.
 
-### Example D — the bot restarts
+### Example D  -  the bot restarts
 
 1. The bot reads its environment and connects to Discord.
 2. Registered permanent `discord.ui.View` classes allow existing buttons to respond.
@@ -129,8 +129,8 @@ Comments explain the *current implementation*. They do not mean a feature has pa
 
 ## Other guides
 
-- [Live Discord testing](LIVE_TESTING.md) — how to test with a separate ordinary account.
-- [Announcements](ANNOUNCEMENTS.md) — automatic and manually scheduled posts.
-- [Shopify integration](SHOPIFY_DISCORD.md) — catalog, order checks, reward codes, and secrets.
+- [Live Discord testing](LIVE_TESTING.md)  -  how to test with a separate ordinary account.
+- [Announcements](ANNOUNCEMENTS.md)  -  automatic and manually scheduled posts.
+- [Shopify integration](SHOPIFY_DISCORD.md)  -  catalog, order checks, reward codes, and secrets.
 
 If you want to understand a particular button, search GitHub for its label or `custom_id`, follow its callback, and look for the helper it calls in `bot.py`.
