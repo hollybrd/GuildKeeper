@@ -2,6 +2,15 @@
 
 Discord publishing is best-effort. A reserved delivery that has an uncertain
 result is never blindly replayed, avoiding accidental duplicate pings.
+
+
+READING GUIDE
+-------------
+This is the *engine* behind the Admin Hub announcement controls.
+Schedules are stored in SQLite, not in-memory timers, so they survive restarts.
+All posted times are interpreted in Europe/London, including daylight saving.
+If a send has an uncertain result, it is held for review instead of blindly
+retrying and potentially pinging people twice.
 """
 import calendar
 from datetime import datetime, timedelta, timezone
@@ -16,6 +25,7 @@ FREQUENCIES = ("once", "daily", "weekly", "monthly")
 FORMAT = "%Y-%m-%d %H:%M"
 
 
+# Create the persistent tables on first run without erasing existing scheduled jobs.
 def initialize():
     with api.connect() as db:
         db.execute("""CREATE TABLE IF NOT EXISTS scheduled_announcements (
@@ -36,6 +46,7 @@ def initialize():
         )""")
 
 
+# Turn the moderator's typed date into a timezone-aware UK date; reject invalid clock-change times.
 def parse_local(value):
     try:
         naive = datetime.strptime(value.strip(), FORMAT)
@@ -71,6 +82,7 @@ def recurrence_after(previous, frequency):
     return aware
 
 
+# Work out the next future run of a recurring job, skipping missed runs after downtime.
 def next_occurrence(previous, frequency, month_day, now):
     if frequency == "once":
         return None
@@ -102,6 +114,7 @@ def validate_image(url):
     return url
 
 
+# Verify GuildKeeper can view, send, and embed in the destination before accepting a job.
 def check_channel(guild, channel_id, ping=False):
     channel = guild.get_channel(channel_id) if guild else None
     if not isinstance(channel, discord.TextChannel):
@@ -118,6 +131,7 @@ def check_channel(guild, channel_id, ping=False):
     return channel
 
 
+# Validate schedule fields and build the values that will be saved to SQLite.
 def build_data(guild, channel_id, title, body, when, recurrence, image_url="", ping=False, now=None):
     if recurrence not in FREQUENCIES:
         raise ValueError("Choose Once, Daily, Weekly or Monthly.")
@@ -148,6 +162,7 @@ def embed(title, body, image_url=""):
     return obj
 
 
+# Save a newly confirmed schedule. Creating a job does not post it immediately.
 def create(data, actor):
     initialize()
     with api.connect() as db:
@@ -168,6 +183,7 @@ def get(job_id):
                           (api.GUILD_ID,job_id)).fetchone()
 
 
+# List active and historical schedules for the admin panel.
 def upcoming(limit=25):
     initialize()
     with api.connect() as db:
@@ -176,6 +192,7 @@ def upcoming(limit=25):
          next_run_utc,id LIMIT ?""", (api.GUILD_ID,limit)).fetchall()
 
 
+# Edit an existing job in one database transaction, so partially saved data cannot leak.
 def update(job_id, data):
     initialize()
     with api.connect() as db:
@@ -193,6 +210,7 @@ def update(job_id, data):
            api.GUILD_ID,job_id))
 
 
+# Cancel or delete future runs without deleting previously posted Discord messages.
 def change_status(job_id, new_status):
     if new_status not in ("cancelled","deleted"):
         raise ValueError("Can only cancel or delete scheduled announcements.")
@@ -207,6 +225,7 @@ def change_status(job_id, new_status):
                    (new_status,api.GUILD_ID,job_id))
 
 
+# Reserve a due job, send once to Discord, and record the outcome and next run.
 async def dispatch_one(job_id, now=None):
     initialize()
     now=now or api.utc_now()
@@ -247,6 +266,7 @@ async def dispatch_one(job_id, now=None):
     return bool(message_id)
 
 
+# Pick up to 12 due custom jobs per scheduler cycle rather than flooding Discord.
 async def run_custom_due(now=None):
     initialize()
     now=now or api.utc_now()
@@ -260,6 +280,7 @@ async def run_custom_due(now=None):
     return outcomes
 
 
+# Calculate last month's XP earned from the XP log; lifetime XP is never reset.
 def monthly_top_10(gid, start, end):
     """Monthly snapshot of XP earned; lifetime XP is never reset."""
     with api.connect() as db:
@@ -270,6 +291,7 @@ def monthly_top_10(gid, start, end):
     return [(r["user_id"],r["total"]) for r in rows if r["total"] > 0]
 
 
+# Use a unique event key to prevent automatic notices duplicating across restarts.
 async def automatic_event(key, title, body, channel_id):
     """Exactly one attempt per event; uncertain sends require manual attention."""
     initialize()
@@ -302,6 +324,7 @@ async def automatic_event(key, title, body, channel_id):
     return bool(mid)
 
 
+# Announce a new quest week after its board exists, and recap the prior month on the first.
 async def run_automatic(now=None):
     """Board notice only after weekly board exists; monthly leaderboard is a recap, NOT a reset."""
     initialize()
@@ -335,6 +358,7 @@ async def run_automatic(now=None):
             "🏆 Monthly leaderboard recap",content,api.ANNOUNCEMENTS_CHANNEL_ID)
 
 
+# Count jobs that require human review, for the Admin Hub Health Check.
 def failed_count():
     initialize()
     with api.connect() as db:
@@ -345,6 +369,7 @@ def failed_count():
     return manual+auto
 
 
+# Called by bot.py's periodic scheduler to dispatch both custom and automatic posts.
 async def tick():
     await run_custom_due()
     await run_automatic()
