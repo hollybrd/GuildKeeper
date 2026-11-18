@@ -108,6 +108,19 @@ class PurchaseMilestoneTests(unittest.TestCase):
                 (self.gid, self.uid),
             ).fetchone()[0], 1)
 
+    def test_legacy_six_milestone_history_gets_one_completion_bonus(self):
+        with bot.connect() as db:
+            for kind, *_ in bot.MILESTONE_QUESTS:
+                db.execute(
+                    'INSERT INTO milestone_claims(guild_id,user_id,kind,claimed_at) VALUES (?,?,?,?)',
+                    (self.gid, self.uid, kind, bot.utc_now().isoformat()),
+                )
+        bot.setup_db()
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 500)
+        self.assertTrue(bot.milestone_progress(self.gid, self.uid)['bonus_earned'])
+        bot.setup_db()
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 500)
+
     def test_milestone_panel_and_reward_summary_do_not_give_unearned_xp(self):
         self.assertIn('Completed: 0/6', bot.milestone_quests_embed(self.gid, self.uid).description)
         self.assertIn('Locked', bot.order_rewards_text(self.gid, self.uid))
