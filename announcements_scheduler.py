@@ -191,12 +191,12 @@ def get(job_id):
 
 
 # List active and historical schedules for the admin panel.
-def upcoming(limit=25):
+def upcoming(limit=25, offset=0):
     initialize()
     with api.connect() as db:
         return db.execute("""SELECT * FROM scheduled_announcements WHERE guild_id=?
          AND status!='deleted' ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END,
-         next_run_utc,id LIMIT ?""", (api.GUILD_ID,limit)).fetchall()
+         next_run_utc,id LIMIT ? OFFSET ?""", (api.GUILD_ID,limit,offset)).fetchall()
 
 
 # Edit an existing job in one database transaction, so partially saved data cannot leak.
