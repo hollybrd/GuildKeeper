@@ -3465,8 +3465,7 @@ class PlayerStatsView(discord.ui.View):
                        custom_id='guildkeeper:stats:ranks')
     async def ranks_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            **private_progress_content('ranks', interaction),
-            view=PrivateProgressView(interaction.user.id, 'ranks'), ephemeral=True)
+            **private_progress_content('ranks', interaction), ephemeral=True)
 
     @discord.ui.button(label='Activate Pause', emoji='⏸️', style=discord.ButtonStyle.primary,
                        custom_id='guildkeeper:stats:activate_pause', row=1)
