@@ -1,6 +1,7 @@
 """Permanent, private GuildKeeper testing shortcuts. Reuses existing commands."""
 import discord
 import quest_testing
+import admin_action_safety
 from discord import app_commands
 
 api = None
@@ -327,18 +328,8 @@ class CheatUserSelect(discord.ui.UserSelect):
                 'Choose which rank reward request to reset for this player. '
                 'This may delete their existing ticket channel.',
                 view=RewardRankPicker(self.view.owner_id, member.id), ephemeral=True)
-        title = ACTIONS[self.action][0]
-        consequences = {
-            'starter_reset': 'Removes Starter claims, may deduct awarded Starter XP, and removes access role.',
-            'weekly_reset': 'Clears current weekly activity and completion, deducting related Weekly XP.',
-            'pause_reset': 'Deletes all recorded pauses and resumed pauses. Historical streak calculations can change.',
-        }
-        await interaction.response.send_message(
-            '⚠️ **Confirm ' + title + '**\nPlayer: ' + member.mention
-            + '\n' + consequences[self.action] + '\n\n**This changes live data and cannot be automatically undone.**',
-            view=ConfirmCheat(self.view.owner_id, member.id, self.action),
-            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
-
+        await interaction.response.send_modal(
+            ResetReasonForm(self.view.owner_id, member.id, self.action))
 
 class CheatMemberPickerView(Private):
     def __init__(self, owner_id, action):
@@ -389,13 +380,8 @@ class RewardRankPicker(Private):
     ])
     async def select(self, interaction, select):
         rank = select.values[0]
-        await interaction.response.send_message(
-            '⚠️ Reset **' + rank + '** reward request for <@' + str(self.target_id)
-            + '>?\nThe original reward request and ticket channel may be deleted. '
-            'Rank unlocks and XP are preserved.',
-            view=ConfirmCheat(self.owner_id, self.target_id, 'reward_reset', rank=rank),
-            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
-
+        await interaction.response.send_modal(
+            ResetReasonForm(self.owner_id, self.target_id, 'reward_reset', rank=rank))
 
 async def run_existing_command(interaction, action, target_id, weeks=None, rank=None):
     """Run unchanged legacy command implementation; permissions checked first."""
