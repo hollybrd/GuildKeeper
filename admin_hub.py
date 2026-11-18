@@ -518,8 +518,9 @@ def shopify_status():
             '**Products:** Public Shopify storefront feed\n'
             '**Order checks & codes:** '+("Admin API configured" if configured
                                           else "Admin API credentials needed")+'\n'
-            '**Automatic new drops/sales:** '+("Enabled" if api.shopify_events.enabled()
-                                               else "Disabled by default")+'\n'
+            '**Automatic new drops/sales:** '+
+            (f'{sum(api.announcements_scheduler.automation_policy(k)["enabled"] for k in ("shop_new","shop_sale"))} of 2 enabled'
+             )+'\n'
             f'**Codes delivered:** {codes}\n\n'
             'Shopify checkout stays on the official website. '
             'No tokens are displayed in Discord.')
