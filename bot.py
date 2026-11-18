@@ -3301,7 +3301,7 @@ def player_stats_embed():
     embed.add_field(name='👤 Profile', value='Your XP, rank, and next milestone', inline=False)
     embed.add_field(name='🔥 Streak', value='Your completed weeks and current streak', inline=False)
     embed.add_field(name='🏆 Ranks', value='All Guild XP ranks and requirements', inline=False)
-    embed.add_field(name='⏸️ Activate Pause', value='Use a pause for the current weekly quest (2 per rolling 13 weeks)', inline=False)
+    embed.add_field(name='⏸️ Pauses', value='Check your balance and active pause; activate or resume XP privately', inline=False)
     embed.add_field(name='▶️ Resume XP', value='End an active pause early and resume earning XP; the pause is not refunded', inline=False)
     embed.add_field(name='🎟️ Claim Reward', value='See eligible one-time rank rewards and open a private ticket with admins', inline=False)
     embed.add_field(name='📥 Inbox', value='Review private alerts and your lost XP history', inline=False)
@@ -3491,16 +3491,14 @@ class PlayerStatsView(discord.ui.View):
             profile_progress_text(interaction.guild_id, interaction.user.id, interaction.user.display_name),
             ephemeral=True)
 
-    @discord.ui.button(label='Activate Pause', emoji='⏸️', style=discord.ButtonStyle.primary,
+    @discord.ui.button(label='Pauses', emoji='⏸️', style=discord.ButtonStyle.primary,
                        custom_id='guildkeeper:stats:activate_pause', row=1)
     async def activate_pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.guild_id != GUILD_ID:
             return await interaction.response.send_message('This button is not available here.', ephemeral=True)
         await interaction.response.send_message(
-            '⏸️ **Are you sure you want to activate a pause?** '
-            'This uses one of your two pauses in a rolling 13-week period for the current week.\n'
-            + pause_allowance_text(interaction.guild_id, interaction.user.id),
-            view=ConfirmPauseView(interaction.user.id), ephemeral=True)
+            pause_panel_text(interaction.guild_id, interaction.user.id),
+            view=PausePanelView(interaction.user.id), ephemeral=True)
 
 
     @discord.ui.button(label='Resume XP', emoji='▶️', style=discord.ButtonStyle.success,
@@ -3607,6 +3605,107 @@ def pause_allowance_text(gid: int, uid: int) -> str:
     return f'**Pauses remaining: {max(0, 2-used)}/2.**'
 
 
+def pause_panel_text(gid: int, uid: int) -> str:
+    """Read the current weekly pause and rolling allowance without changing either."""
+    current_week = week_key()
+    cutoff = (week_start() - timedelta(weeks=13)).date().isoformat()
+    with connect() as db:
+        used = db.execute(
+            'SELECT COUNT(*) AS n FROM pauses WHERE guild_id=? AND user_id=? '
+            'AND week_key>? AND week_key<=?',
+            (gid, uid, cutoff, current_week)).fetchone()['n']
+        spent_current = db.execute(
+            'SELECT 1 FROM pauses WHERE guild_id=? AND user_id=? AND week_key=?',
+            (gid, uid, current_week)).fetchone() is not None
+    paused_now = is_paused(gid, uid, current_week)
+    remaining = max(0, 2 - used)
+    if paused_now:
+        status = '⏸️ **Active pause — XP collection is suspended.**'
+        explanation = ('Your current Weekly Side Quest is paused. Weekly activity will not earn XP '
+                       'until you resume. Your streak is protected for this week.')
+    elif spent_current:
+        status = '▶️ **XP collection resumed — pause already used this week.**'
+        explanation = ('You can earn weekly XP again, but this week\'s pause remains spent. '
+                       'It cannot be refunded or activated again this week.')
+    else:
+        status = '✅ **No active pause — XP collection is enabled.**'
+        explanation = 'You can earn weekly XP normally.'
+    return (
+        '⏸️ **GYMGUILD — YOUR PAUSES**\n'
+        f'**Pauses remaining:** {remaining}/2 (rolling 13 weeks)\n'
+        f'**Current week:** {current_week}\n'
+        f'{status}\n{explanation}\n'
+        f'**Next weekly reset:** <t:{int(next_reset().timestamp())}:F>\n\n'
+        '⚠️ **Using a pause is irreversible.** Activating consumes one of your two '
+        'pauses immediately and suspends weekly XP accumulation. Resuming XP '
+        '**does not return your pause**; it only allows you to earn XP again. '
+        'Used pauses replenish only when they fall outside the rolling 13-week window.'
+    )
+
+
+class PausePanelView(discord.ui.View):
+    """Private, short-lived pause controls. The persistent hub remains unchanged."""
+    def __init__(self, user_id: int):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild_id != GUILD_ID or interaction.user.id != self.user_id:
+            await interaction.response.send_message('This pause panel belongs to another member.', ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='Activate Pause', emoji='⏸️', style=discord.ButtonStyle.danger)
+    async def activate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        gid, uid = interaction.guild_id, interaction.user.id
+        with connect() as db:
+            exists = db.execute(
+                'SELECT 1 FROM pauses WHERE guild_id=? AND user_id=? AND week_key=?',
+                (gid, uid, week_key())).fetchone() is not None
+        if exists or is_paused(gid, uid, week_key()):
+            return await interaction.response.send_message(
+                'This week\'s pause has already been used. You cannot spend it twice or reactivate it. '
+                'Use **Refresh** to view your current status.', ephemeral=True)
+        cutoff = (week_start() - timedelta(weeks=13)).date().isoformat()
+        with connect() as db:
+            used = db.execute(
+                'SELECT COUNT(*) AS n FROM pauses WHERE guild_id=? AND user_id=? '
+                'AND week_key>? AND week_key<=?',
+                (gid, uid, cutoff, week_key())).fetchone()['n']
+        if used >= 2:
+            return await interaction.response.send_message(
+                'Both pauses have been used in the rolling 13-week window. '
+                'Use **Refresh** to check your balance.', ephemeral=True)
+        await interaction.response.send_message(
+            '⚠️ **Are you absolutely sure you want to use a pause?**\n\n'
+            '• This immediately uses **1 of your 2 pauses** in a rolling 13-week period.\n'
+            '• You **will not accumulate weekly activity XP** while paused.\n'
+            '• The pause protects this week\'s streak from inactivity.\n'
+            '• You can **Resume XP** later, but this **does not undo or refund** the pause.\n\n'
+            '**This action cannot be undone.** Confirm only if you want to spend a pause.',
+            view=ConfirmPauseView(uid), ephemeral=True)
+
+    @discord.ui.button(label='Resume XP', emoji='▶️', style=discord.ButtonStyle.success)
+    async def resume(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_paused(interaction.guild_id, interaction.user.id, week_key()):
+            return await interaction.response.send_message(
+                'XP collection is already enabled. No active pause to resume.\n'
+                + pause_allowance_text(interaction.guild_id, interaction.user.id),
+                ephemeral=True)
+        await interaction.response.send_message(
+            '▶️ **Resume XP collection?** You will earn XP again from future qualifying activity. '
+            '**Your pause will NOT be refunded** and will still count toward your '
+            'two pauses in a rolling 13-week window. The recorded paused week '
+            'will continue to protect your streak.',
+            view=ConfirmResumeView(self.user_id), ephemeral=True)
+
+    @discord.ui.button(label='Refresh', emoji='🔄', style=discord.ButtonStyle.secondary)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content=pause_panel_text(interaction.guild_id, interaction.user.id),
+            view=self)
+
+
 class ConfirmResumeView(discord.ui.View):
     """Private confirmation to resume XP while retaining a spent pause."""
     def __init__(self, user_id: int):
@@ -3681,8 +3780,10 @@ class ConfirmPauseView(discord.ui.View):
                 db.execute('INSERT INTO pauses VALUES (?,?,?,?)',
                            (interaction.guild_id, interaction.user.id, wk, utc_now().isoformat()))
                 result = (f'✅ **Pause activated!** Your Weekly Side Quest for **{wk}** is paused. '
-                          'Your streak is protected and you will not receive an inactivity penalty this week. '
-                          'Your pause ends at the next weekly reset.')
+                          '**Weekly XP collection is now suspended.** Your streak is protected '
+                          'and you will not receive an inactivity penalty this week. '
+                          '**This pause has been spent permanently** and cannot be refunded, '
+                          'even if you resume XP collection. Your pause ends at the next weekly reset.')
         result += '\n' + pause_allowance_text(interaction.guild_id, interaction.user.id)
         await interaction.response.edit_message(content=result, view=None)
 
