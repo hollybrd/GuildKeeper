@@ -198,6 +198,182 @@ async def snapshot(api, guild):
     return checks
 
 
+
+async def _repair_saved_embed(api, guild, label, channel_id, message_id,
+                              expected_embed, expected_view, update_record):
+    """Edit an existing panel first; only post a replacement when absent."""
+    channel = guild.get_channel(channel_id) if channel_id else None
+    if not isinstance(channel, discord.TextChannel):
+        return False, f'{label}: configured channel is unavailable'
+    message = None
+    if message_id:
+        try:
+            message = await channel.fetch_message(message_id)
+        except discord.NotFound:
+            message = None
+        except (discord.Forbidden, discord.HTTPException):
+            return False, f'{label}: cannot inspect existing message; skipped to avoid duplicates'
+    try:
+        if message is None:
+            message = await channel.send(embed=expected_embed, view=expected_view,
+                                         allowed_mentions=discord.AllowedMentions.none())
+        else:
+            await message.edit(embed=expected_embed, view=expected_view)
+    except (discord.Forbidden, discord.HTTPException):
+        return False, f'{label}: failed to edit/post; check channel permissions'
+    update_record(channel.id, message.id)
+    return True, f'{label}: {"created" if not message_id else "updated or replaced"}'
+
+
+async def _repair_role_menu(api, guild, kind):
+    label = 'Class Role Menu' if kind == 'gym' else 'Proficiency Role Menu'
+    channel = guild.get_channel(api.GET_ROLE_CHANNEL_ID)
+    if not isinstance(channel, discord.TextChannel):
+        return False, f'{label}: role-menu channel not configured'
+    try:
+        mapping = api.role_menu_mapping(kind)
+    except ValueError as error:
+        return False, f'{label}: {error}'
+    with api.connect() as db:
+        row = db.execute('SELECT channel_id,message_id FROM role_menu_posts '
+                         'WHERE guild_id=? AND menu_type=?', (guild.id, kind)).fetchone()
+    old_channel = guild.get_channel(row['channel_id']) if row else None
+    message = None
+    if row and isinstance(old_channel, discord.TextChannel):
+        try:
+            message = await old_channel.fetch_message(row['message_id'])
+        except discord.NotFound:
+            message = None
+        except (discord.Forbidden, discord.HTTPException):
+            return False, f'{label}: cannot inspect previous menu; skipped'
+    if message is not None and old_channel.id == channel.id:
+        title = '⚔️ CHOOSE YOUR CLASS' if kind == 'gym' else '🔮 CHOOSE YOUR PROFICIENCY'
+        description = (
+            'React to choose your training class. Selecting a different class replaces the previous one.'
+            if kind == 'gym' else
+            'React to select as many proficiencies as you like. Remove a reaction to unselect.')
+        lines = [f'{emoji} — <@&{role_id}>' for emoji, role_id in mapping.items()]
+        embed = discord.Embed(title=title, description=description + '\n\n' + '\n\n'.join(lines),
+                              color=0x71A7A2)
+        embed.set_footer(text='Class & Proficiency roles only · XP ranks are earned automatically')
+        try:
+            await message.edit(embed=embed)
+            old_emoji = {str(r.emoji) for r in message.reactions}
+            expected_emoji = set(mapping)
+            # Preserve member choices for unchanged emoji; clear obsolete only.
+            for emoji in old_emoji - expected_emoji:
+                await message.clear_reaction(emoji)
+            for emoji in expected_emoji - old_emoji:
+                await message.add_reaction(emoji)
+        except (discord.Forbidden, discord.HTTPException, discord.InvalidArgument):
+            return False, f'{label}: could not refresh reactions; check Manage Messages and Add Reactions'
+        return True, f'{label}: updated in place'
+    try:
+        await api.publish_role_menu(guild, channel, kind, mapping)
+    except (ValueError, discord.Forbidden, discord.HTTPException) as error:
+        return False, f'{label}: {error}'
+    if message is not None:
+        try:
+            await message.delete()
+        except (discord.Forbidden, discord.HTTPException):
+            return True, f'{label}: new panel posted; previous panel could not be removed'
+    return True, f'{label}: created'
+
+
+async def _repair_weekly(api, guild):
+    channel = guild.get_channel(api.QUESTS_CHANNEL_ID)
+    if not isinstance(channel, discord.TextChannel):
+        return False, 'Weekly Side Quest: channel not configured'
+    expected = api.weekly_board_embed()
+    candidate = None
+    try:
+        async for message in channel.history(limit=100):
+            if message.author.id != guild.me.id or not message.embeds:
+                continue
+            if message.embeds[0].title != expected.title:
+                continue
+            if (message.embeds[0].footer.text or '').endswith(api.week_key()):
+                candidate = message
+                break
+    except (discord.Forbidden, discord.HTTPException):
+        return False, 'Weekly Side Quest: cannot inspect recent messages; skipped'
+    if candidate is not None:
+        try:
+            await candidate.edit(embed=expected, view=api.WeeklyTurnInView())
+        except (discord.Forbidden, discord.HTTPException):
+            return False, 'Weekly Side Quest: unable to edit existing board'
+        return True, 'Weekly Side Quest: updated existing board'
+    # Existing scheduler also uses this path; force avoids a stale schedule_posts flag.
+    await api.post_weekly_board(force=True)
+    # Verify a board appeared rather than assuming that the void-return function succeeded.
+    result = await _weekly_board(api, guild)
+    return (result['state'] == 'current',
+            'Weekly Side Quest: ' + ('new board posted' if result['state'] == 'current'
+                                    else 'unable to verify newly posted board'))
+
+
+async def repair(api, guild, states):
+    """Repair only verifiably missing/outdated panels; never touch unknown/setup."""
+    gid = guild.id
+    results = []
+    for entry in states:
+        if entry['state'] not in {'missing', 'outdated'}:
+            continue
+        name = entry['name']
+        try:
+            if name == 'Admin Hub':
+                channel_id, _ = _parse_location(
+                    _saved_config(api, f'admin-hub-post-{gid}'), api.MOD_REVIEW_CHANNEL_ID)
+                channel = guild.get_channel(channel_id) if channel_id else None
+                if isinstance(channel, discord.TextChannel):
+                    ok, info = await api.admin_hub.post_admin_hub(channel)
+                else:
+                    ok, info = False, 'Admin Hub: original channel unavailable; skipped'
+            elif name == 'Player Hub':
+                ok, info = await api.post_player_stats_hub()
+            elif name == 'Leaderboard':
+                ok, info = await api.update_permanent_leaderboard(force=True)
+            elif name == 'Weekly Side Quest':
+                ok, info = await _repair_weekly(api, guild)
+            elif name == 'Starter Quests':
+                with api.connect() as db:
+                    saved = db.execute('SELECT channel_id,message_id FROM starter_board_posts '
+                                       'WHERE guild_id=?', (gid,)).fetchone()
+                if not api.STARTER_ACCESS_ROLE_ID or not guild.get_role(api.STARTER_ACCESS_ROLE_ID):
+                    ok, info = False, 'Starter Quests: missing configured access role'
+                else:
+                    def save_starter(cid, mid):
+                        with api.connect() as db:
+                            db.execute('INSERT INTO starter_board_posts(guild_id,channel_id,message_id) '
+                                       'VALUES (?,?,?) ON CONFLICT(guild_id) DO UPDATE SET '
+                                       'channel_id=excluded.channel_id,message_id=excluded.message_id',
+                                       (gid, cid, mid))
+                    ok, info = await _repair_saved_embed(
+                        api, guild, name, saved['channel_id'] if saved else api.STARTER_CHANNEL_ID,
+                        saved['message_id'] if saved else None,
+                        api.starter_embed(), api.StarterTurnInView(), save_starter)
+            elif name == 'Milestone Quests':
+                channel_id, message_id = _parse_location(
+                    _saved_config(api, f'milestone-board-{gid}'), None)
+                def save_milestone(cid, mid):
+                    with api.connect() as db:
+                        db.execute('INSERT OR REPLACE INTO v12_config(key,value) VALUES (?,?)',
+                                   (f'milestone-board-{gid}', f'{cid}:{mid}'))
+                ok, info = await _repair_saved_embed(
+                    api, guild, name, channel_id, message_id,
+                    api.milestone_board_embed(), api.MilestoneBoardView(), save_milestone)
+            elif name == 'Class Role Menu':
+                ok, info = await _repair_role_menu(api, guild, 'gym')
+            elif name == 'Proficiency Role Menu':
+                ok, info = await _repair_role_menu(api, guild, 'hobby')
+            else:
+                ok, info = False, f'{name}: no automatic refresh configured'
+        except (discord.Forbidden, discord.HTTPException, ValueError) as exc:
+            ok, info = False, f'{name}: {type(exc).__name__} — refresh failed'
+        results.append((ok, info))
+    return results
+
+
 def render(states):
     icons = {'current': '✅', 'outdated': '🟠', 'missing': '❌',
              'setup': '⚙️', 'unknown': '❔'}
