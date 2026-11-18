@@ -72,7 +72,7 @@ class TestingCheatsView(discord.ui.View):
         await choose_member(interaction, 'starter_reset')
 
     @discord.ui.button(label='Weekly Reset', emoji='📜', style=discord.ButtonStyle.secondary,
-                       custom_id='guildkeeper:testing:weekly', row=1)
+                       custom_id='guildkeeper:testing:weekly', row=0)
     async def weekly(self, interaction, button):
         await choose_member(interaction, 'weekly_reset')
 
@@ -89,7 +89,7 @@ class TestingCheatsView(discord.ui.View):
         await choose_member(interaction, 'pause_reset')
 
     @discord.ui.button(label='Rank Test Reset', emoji='🏆', style=discord.ButtonStyle.secondary,
-                       custom_id='guildkeeper:testing:rank', row=2)
+                       custom_id='guildkeeper:testing:rank', row=1)
     async def rank(self, interaction, button):
         await interaction.response.send_message(
             '⚠️ **Reset YOUR rank test to Novice (50 XP)?**\n'
@@ -113,7 +113,7 @@ class TestingCheatsView(discord.ui.View):
             view=MilestoneTargetView(interaction.user.id), ephemeral=True)
 
     @discord.ui.button(label='All Test Commands', emoji='📋', style=discord.ButtonStyle.secondary,
-                       custom_id='guildkeeper:testing:commands', row=3)
+                       custom_id='guildkeeper:testing:commands', row=2)
     async def commands(self, interaction, button):
         await interaction.response.send_message(embed=test_command_guide(), ephemeral=True)
 
