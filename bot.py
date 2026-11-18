@@ -2071,11 +2071,11 @@ def boost_milestone_message(gid: int, uid: int, currently_boosting: bool) -> str
         )
     return (
         '💎 **Boost GYMGUILD**\n'
-        'Discord does not allow bots to open the native Server Boost checkout window.\\n\\n'
-        '**To boost this server:**\\n'
-        '1. Click **GYMGUILD✦** at the top-left of the channel list.\\n'
-        '2. Select **Server Boost** (or open **Server Boosts** in the sidebar).\\n'
-        '3. Choose **Boost This Server** and follow Discord’s confirmation steps.\\n\\n'
+        'Discord does not allow bots to open the native Server Boost checkout window.\n\n'
+        '**To boost this server:**\n'
+        '1. Click **GYMGUILD✦** at the top-left of the channel list.\n'
+        '2. Select **Server Boost** (or open **Server Boosts** in the sidebar).\n'
+        '3. Choose **Boost This Server** and follow Discord’s confirmation steps.\n\n'
         f'Once Discord confirms your first boost, GuildKeeper awards **{MILESTONE_XP["boost1"]} XP** automatically. '
         'Boosting may use an existing Nitro boost or require payment; check Discord’s price before confirming.'
     )
