@@ -3301,13 +3301,13 @@ def player_stats_embed():
     embed.add_field(name='👤 Profile', value='Your XP, rank, and next milestone', inline=False)
     embed.add_field(name='🔥 Streak', value='Your completed weeks and current streak', inline=False)
     embed.add_field(name='🏆 Ranks', value='All Guild XP ranks and requirements', inline=False)
+    embed.add_field(name='📜 All Quests', value='Track weekly objectives and permanent milestones with links to their channels', inline=False)
     embed.add_field(name='⏸️ Pauses', value='Check your balance and active pause; activate or resume XP privately', inline=False)
     embed.add_field(name='▶️ Resume XP', value='End an active pause early and resume earning XP; the pause is not refunded', inline=False)
     embed.add_field(name='🎟️ Claim Reward', value='See eligible one-time rank rewards and open a private ticket with admins', inline=False)
     embed.add_field(name='📥 Inbox', value='Review private alerts and your lost XP history', inline=False)
     embed.add_field(name='✉️ Bot DMs', value='Disable DMs to stop private pings; Inbox remains available', inline=False)
     embed.add_field(name='🔔 Guild Blast', value='Opt in or out of Guild announcement mentions at any time', inline=False)
-    embed.add_field(name='📜 All Quests', value='Track weekly objectives and permanent milestones with links to their channels', inline=False)
     embed.set_footer(text='GYMGUILD ✦ Where culture meets strength')
     return embed
 
@@ -3655,7 +3655,7 @@ class PlayerStatsView(discord.ui.View):
 
 
     @discord.ui.button(label='All Quests', emoji='📜', style=discord.ButtonStyle.secondary,
-                       custom_id='guildkeeper:stats:all_quests', row=2)
+                       custom_id='guildkeeper:stats:all_quests', row=0)
     async def all_quests_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.guild_id != GUILD_ID:
             return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
