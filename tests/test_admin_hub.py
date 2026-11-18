@@ -381,3 +381,120 @@ class QuestCompletionCheatsTests(unittest.TestCase):
             self.assertIsNone(db.execute(
                 'SELECT 1 FROM purchase_orders WHERE guild_id=? AND user_id=?',
                 (self.gid, self.uid)).fetchone())
+
+
+class SaferAdminActionsTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.old_db = bot.DB
+        bot.DB = Path(self.temp.name) / 'admin-safety.db'
+        bot.setup_db()
+        self.gid, self.uid = 123, 456
+
+    def tearDown(self):
+        bot.DB = self.old_db
+        self.temp.cleanup()
+
+    def test_impact_preview_counts_starter_and_weekly_refunds(self):
+        import admin_action_safety
+        with bot.connect() as db:
+            db.execute('INSERT INTO starter_claims VALUES (?,?,?,?)',
+                       (self.gid, self.uid, 'intro', bot.utc_now().isoformat()))
+            db.execute('INSERT INTO weekly_actions VALUES (?,?,?,?,?,?,?,?)',
+                       (self.gid, self.uid, bot.week_key(), 'gym',
+                        bot.cycle_day(), -42, 'preview-test', bot.utc_now().isoformat()))
+        starter, snapshot = admin_action_safety.impact(
+            bot, self.gid, self.uid, 'starter_reset')
+        self.assertIn('1/5', starter)
+        self.assertIn('up to 10 XP', starter)
+        self.assertIsInstance(snapshot, tuple)
+        weekly, _ = admin_action_safety.impact(bot, self.gid, self.uid, 'weekly_reset')
+        self.assertIn('1/4', weekly)
+        self.assertIn('up to 25 XP', weekly)
+
+    def test_reward_preview_includes_ticket_id_and_channel(self):
+        import admin_action_safety
+        with bot.connect() as db:
+            db.execute("INSERT INTO reward_tickets(guild_id,user_id,rank,channel_id,status,requested_at) "
+                       "VALUES (?,?,?,?,?,?)",
+                       (self.gid, self.uid, 'Master', 789, 'open', bot.utc_now().isoformat()))
+        detail, current = admin_action_safety.impact(
+            bot, self.gid, self.uid, 'reward_reset', rank='Master')
+        self.assertIn('<#789>', detail)
+        self.assertIn('open', detail)
+        self.assertIsNotNone(current[1])
+
+    def test_reset_reason_is_mandatory_and_confirm_stores_snapshot(self):
+        import testing_cheats
+        modal = testing_cheats.ResetReasonForm(11, 22, 'weekly_reset')
+        self.assertTrue(modal.reason.required)
+        view = testing_cheats.ConfirmCheat(
+            11, 22, 'weekly_reset', reason='QA retest', snapshot=('before',))
+        self.assertEqual(view.reason, 'QA retest')
+        self.assertEqual(view.snapshot, ('before',))
+
+    def test_audit_shows_actor_target_date_and_reason(self):
+        import admin_hub
+        old_gid = bot.GUILD_ID
+        bot.GUILD_ID = self.gid
+        try:
+            admin_hub.audit(11, 'testing_weekly_reset',
+                            'reason=QA retest', self.uid)
+            display = admin_hub.audit_summary()
+            self.assertIn('moderator 11', display)
+            self.assertIn('target 456', display)
+            self.assertIn('reason=QA retest', display)
+        finally:
+            bot.GUILD_ID = old_gid
+
+
+class AutomaticMaintenanceTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.old_db = bot.DB
+        bot.DB = Path(self.temp.name) / 'automatic-maintenance.db'
+        bot.setup_db()
+
+    def tearDown(self):
+        bot.DB = self.old_db
+        self.temp.cleanup()
+
+    def test_job_status_is_persistent_and_reports_failure(self):
+        import admin_maintenance
+        admin_maintenance.record_job(bot, 'weekly_board', False, 'HTTPException')
+        statuses = admin_maintenance.job_statuses(bot)
+        self.assertFalse(statuses['weekly_board']['success'])
+        self.assertEqual(statuses['weekly_board']['error'], 'HTTPException')
+        admin_maintenance.record_job(bot, 'weekly_board', True)
+        self.assertTrue(admin_maintenance.job_statuses(bot)['weekly_board']['success'])
+
+    async def test_unknown_panels_are_skipped_without_repair(self):
+        import admin_maintenance
+        guild = SimpleNamespace(id=bot.GUILD_ID)
+        unknown = [{'name': 'Starter Quests', 'state': 'unknown',
+                    'detail': 'Insufficient permissions', 'url': None}]
+        with patch.object(admin_maintenance.panel_health, 'snapshot',
+                          new=AsyncMock(side_effect=[unknown, unknown])) as snapshot:
+            with patch.object(admin_maintenance.panel_health, 'repair',
+                              new=AsyncMock()) as repair:
+                result = await admin_maintenance.reconcile(bot, guild)
+        repair.assert_not_awaited()
+        self.assertEqual(result['updated'], 0)
+        self.assertEqual(len(result['remaining']), 1)
+        self.assertFalse(admin_maintenance.needs_periodic_check(bot))
+
+    async def test_saved_outdated_panel_repaired_and_rechecked(self):
+        import admin_maintenance
+        guild = SimpleNamespace(id=bot.GUILD_ID)
+        outdated = [{'name': 'Player Hub', 'state': 'outdated',
+                     'detail': 'Stale buttons', 'url': None}]
+        fresh = [{'name': 'Player Hub', 'state': 'current',
+                  'detail': 'Current', 'url': None}]
+        with patch.object(admin_maintenance.panel_health, 'snapshot',
+                          new=AsyncMock(side_effect=[outdated, fresh])):
+            with patch.object(admin_maintenance.panel_health, 'repair',
+                              new=AsyncMock(return_value=[(True, 'Updated')])) as repair:
+                result = await admin_maintenance.reconcile(bot, guild)
+        repair.assert_awaited_once()
+        self.assertEqual(result['updated'], 1)
+        self.assertEqual(result['remaining'], [])
