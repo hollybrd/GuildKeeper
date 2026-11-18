@@ -30,6 +30,34 @@ def last_report(api):
         return None
 
 
+
+def record_job(api, name, success, error=None):
+    """Last status for each scheduler task, retained across restarts."""
+    key = f'scheduled-job-{api.GUILD_ID}-{name}'
+    record = {
+        'timestamp': api.utc_now().isoformat(),
+        'success': bool(success),
+        'error': (str(error)[:200] if error is not None else None),
+    }
+    with api.connect() as db:
+        db.execute('INSERT OR REPLACE INTO v12_config(key,value) VALUES (?,?)',
+                   (key, json.dumps(record)))
+
+
+def job_statuses(api):
+    with api.connect() as db:
+        rows = db.execute('SELECT key,value FROM v12_config WHERE key LIKE ?',
+                          (f'scheduled-job-{api.GUILD_ID}-%',)).fetchall()
+    statuses = {}
+    prefix = f'scheduled-job-{api.GUILD_ID}-'
+    for row in rows:
+        try:
+            statuses[row['key'][len(prefix):]] = json.loads(row['value'])
+        except (ValueError, TypeError):
+            pass
+    return statuses
+
+
 async def reconcile(api, guild):
     """Check live message embeds/buttons and repair verifiably stale/missing panels."""
     timestamp = api.utc_now().isoformat()
