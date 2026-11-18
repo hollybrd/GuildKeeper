@@ -2410,7 +2410,7 @@ async def post_purchase_review(guild: discord.Guild, user_id: int, order_id: int
                         'Still confirm ownership before approving.\n'
                         if shopify_checked else '⚠️ Not Shopify-verified by GuildKeeper. '
                         'Check the order in Shopify before approval.\n')
-                     f'**First approved order: +{MILESTONE_XP["purchase1"]} XP. Subsequent orders: +0 XP.**'),
+                     + f'**First approved order: +{MILESTONE_XP["purchase1"]} XP. Subsequent orders: +0 XP.**'),
         colour=discord.Colour.from_rgb(104, 163, 153),
     )
     try:
