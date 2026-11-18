@@ -1,4 +1,4 @@
-"""GYMGUILD Guildkeeper V1 — Discord slash-command community bot.
+"""GYMGUILD Guildkeeper V1  -  Discord slash-command community bot.
 
 READING GUIDE
 -------------
@@ -349,7 +349,7 @@ def streak_blocked_rank_notice(gid: int, uid: int, xp: int) -> str:
              'You have enough XP, but still need an active weekly streak to unlock:']
     for name, required in blocked:
         lines.append(
-            f'• **{name}** — **{streak}/{required} weeks** '
+            f'• **{name}**  -  **{streak}/{required} weeks** '
             f'(need **{required - streak}** more qualifying week(s)).'
         )
     lines.append(
@@ -423,7 +423,7 @@ def inbox_text(gid, uid, mode='unread'):
             lines = ['📉 **Lost XP history** (12 most recent)']
             for r in rows:
                 date = datetime.fromisoformat(r['created_at']).strftime('%d %b %Y')
-                lines.append(f"• **{r['amount']} XP** · {date} — {discord.utils.escape_markdown(r['reason'])[:120]}")
+                lines.append(f"• **{r['amount']} XP** · {date}  -  {discord.utils.escape_markdown(r['reason'])[:120]}")
             lines.append('\nAdmin reversals are recorded separately in the XP audit log.')
             return '\n'.join(lines)[:1900]
         where = ' AND read_at IS NULL' if mode == 'unread' else ''
@@ -464,7 +464,7 @@ async def deliver_notifications():
             continue
         try:
             member = guild.get_member(r['user_id']) or await guild.fetch_member(r['user_id'])
-            await member.send(f"✦ **GuildKeeper — {r['title']}**\n{r['body']}\n\n"
+            await member.send(f"✦ **GuildKeeper  -  {r['title']}**\n{r['body']}\n\n"
                               'Open your private Inbox in **#stats-and-streaks**. '
                               'Bot DMs can be disabled in the Player Hub.',
                               allowed_mentions=discord.AllowedMentions.none())
@@ -516,7 +516,7 @@ def add_xp(guild_id, user_id, amount, reason, db=None):
     if amount:
         record_notification(db,guild_id,user_id,'xp_loss' if amount<0 else 'xp',
                             'XP Deducted' if amount<0 else 'XP Earned',
-                            f'{amount:+d} XP — {reason}',f'xp-log:{event.lastrowid}')
+                            f'{amount:+d} XP  -  {reason}',f'xp-log:{event.lastrowid}')
     return db.execute('SELECT xp FROM members WHERE guild_id=? AND user_id=?',
                       (guild_id,user_id)).fetchone()['xp']
 
@@ -573,7 +573,7 @@ async def announce_new_guild_member(member: discord.Member) -> None:
     embed.set_thumbnail(url=member.display_avatar.url)
     try:
         await channel.send(
-            content=f'🎉 Congratulations {member.mention} — **Novice**!',
+            content=f'🎉 Congratulations {member.mention}  -  **Novice**!',
             embed=embed,
             allowed_mentions=discord.AllowedMentions(users=[member], roles=False, everyone=False),
         )
@@ -613,7 +613,7 @@ async def announce_level_up(member: discord.Member, old_rank: str, new_rank: str
     embed.set_thumbnail(url=member.display_avatar.url)
     try:
         await channel.send(
-            content=f'🎉 Congratulations {member.mention} — **{new_rank}**!',
+            content=f'🎉 Congratulations {member.mention}  -  **{new_rank}**!',
             embed=embed,
             allowed_mentions=discord.AllowedMentions(users=[member], roles=False, everyone=False),
         )
@@ -831,7 +831,7 @@ def command_directory_lines(admin_only: bool) -> list[str]:
             continue
         description = command.description or 'No description provided.'
         commands_found.append((command.name, description))
-    return [f'**/{name}** — {description}' for name, description in sorted(commands_found)]
+    return [f'**/{name}**  -  {description}' for name, description in sorted(commands_found)]
 
 
 async def send_command_directory(interaction: discord.Interaction, admin_only: bool):
@@ -844,7 +844,7 @@ async def send_command_directory(interaction: discord.Interaction, admin_only: b
             continue
         commands_found.append((command.name, command.description or 'No description provided.'))
     commands_found.sort(key=lambda item: item[0])
-    title = '✦ GUILDKEEPER — ADMIN COMMANDS' if admin_only else '✦ GUILDKEEPER — MEMBER COMMANDS'
+    title = '✦ GUILDKEEPER  -  ADMIN COMMANDS' if admin_only else '✦ GUILDKEEPER  -  MEMBER COMMANDS'
     intro = ('Commands for Guild moderators and administrators.' if admin_only
              else 'Commands available to Guild members.')
     embeds = []
@@ -929,7 +929,7 @@ class RankProfileButtonView(discord.ui.View):
 async def ranks(interaction: discord.Interaction):
     xp = get_xp(interaction.guild_id, interaction.user.id)
     streak_notice = streak_blocked_rank_notice(interaction.guild_id, interaction.user.id, xp)
-    await interaction.response.send_message( '**GYMGUILD RANKS**\n'+'\n'.join(f'✦ **{name}** — {threshold:,} XP' + (f' + {STREAK_REQUIREMENTS[name]}-week **active** streak to unlock' if name in STREAK_REQUIREMENTS else '') for name,threshold in RANKS) + '\n\n**Rank rules:** Streaks must be active when unlocking Master, Legend or Paragon. Once unlocked, breaking your streak will not demote you; losing XP below a rank threshold can. Regaining XP restores previously unlocked ranks without repeating the streak.\n**Rewards:** Master (10%), Legend (15%) and Paragon (20%) are unlocked permanently when their rank requirements are first met. Each reward can be claimed **once**, even after an XP demotion. Paused weeks preserve streaks but do not increase them.' + ('\n\n' + streak_notice if streak_notice else ''), view=RankProfileButtonView(interaction.user.id), ephemeral=True)
+    await interaction.response.send_message( '**GYMGUILD RANKS**\n'+'\n'.join(f'✦ **{name}**  -  {threshold:,} XP' + (f' + {STREAK_REQUIREMENTS[name]}-week **active** streak to unlock' if name in STREAK_REQUIREMENTS else '') for name,threshold in RANKS) + '\n\n**Rank rules:** Streaks must be active when unlocking Master, Legend or Paragon. Once unlocked, breaking your streak will not demote you; losing XP below a rank threshold can. Regaining XP restores previously unlocked ranks without repeating the streak.\n**Rewards:** Master (10%), Legend (15%) and Paragon (20%) are unlocked permanently when their rank requirements are first met. Each reward can be claimed **once**, even after an XP demotion. Paused weeks preserve streaks but do not increase them.' + ('\n\n' + streak_notice if streak_notice else ''), view=RankProfileButtonView(interaction.user.id), ephemeral=True)
 
 
 
@@ -974,7 +974,7 @@ async def admin_quest_create(interaction: discord.Interaction, title: str, descr
     await reply(interaction, f'📜 Quest **#{qid}: {title}** created! Members can use `/quests` and `/quest_progress`.')
     channel = bot.get_channel(QUESTS_CHANNEL_ID)
     if isinstance(channel,discord.TextChannel) and channel.guild.id==interaction.guild_id:
-        await channel.send(f'📜 **NEW GUILD QUEST — #{qid}: {discord.utils.escape_markdown(title)}**\n{discord.utils.escape_mentions(description)}\nReward: **{reward} XP**\nUse `/quest_progress quest_id:{qid}` to begin.', allowed_mentions=discord.AllowedMentions.none())
+        await channel.send(f'📜 **NEW GUILD QUEST  -  #{qid}: {discord.utils.escape_markdown(title)}**\n{discord.utils.escape_mentions(description)}\nReward: **{reward} XP**\nUse `/quest_progress quest_id:{qid}` to begin.', allowed_mentions=discord.AllowedMentions.none())
 
 @bot.tree.command(name='admin_streak_add', description='Moderator: credit consecutive streak weeks to a member (no XP awarded)')
 @app_commands.default_permissions(manage_guild=True)
@@ -1203,7 +1203,7 @@ def milestone_quests_embed(gid: int, uid: int) -> discord.Embed:
     progress = milestone_progress(gid, uid)
     orders = purchase_order_summary(gid, uid)
     embed = discord.Embed(
-        title='✦ GYMGUILD — MILESTONE QUESTS ✦',
+        title='✦ GYMGUILD  -  MILESTONE QUESTS ✦',
         description=(
             f'**Completed: {progress["completed"]}/{progress["total"]}** permanent milestones\n'
             f'Complete them all to receive a one-time **+{MILESTONE_COMPLETION_BONUS} XP** Main Quest Completion bonus! '
@@ -1224,12 +1224,12 @@ def milestone_quests_embed(gid: int, uid: int) -> discord.Embed:
                       if orders['pending'] else
                       f' ({orders["approved"]} approved orders)')
         embed.add_field(
-            name=f'{"✅" if achieved else "⬜"} {MILESTONE_EMOJI[kind]} {label} — {xp} XP',
+            name=f'{"✅" if achieved else "⬜"} {MILESTONE_EMOJI[kind]} {label}  -  {xp} XP',
             value=description + detail + '\n\u200b',
             inline=False,
         )
     embed.add_field(
-        name='🏆 Main Quest Completion — +500 XP',
+        name='🏆 Main Quest Completion  -  +500 XP',
         value='✅ Claimed permanently!' if progress['bonus_earned']
               else f'🔒 {progress["completed"]}/{progress["total"]} milestones completed',
         inline=False,
@@ -1462,9 +1462,9 @@ def reward_eligibility_text(gid: int, uid: int) -> str:
         if rank in requests:
             status = 'Already requested (' + requests[rank] + ')'
         elif rank in unlocked:
-            status = 'Eligible — unclaimed'
+            status = 'Eligible  -  unclaimed'
         else:
-            status = 'Locked — requires ' + str(STREAK_REQUIREMENTS[rank]) + '-week active streak and ' + str(dict(RANKS)[rank]) + ' XP'
+            status = 'Locked  -  requires ' + str(STREAK_REQUIREMENTS[rank]) + '-week active streak and ' + str(dict(RANKS)[rank]) + ' XP'
         lines.append(f'• **{rank} ({discount}% off):** {status}')
     return '\n'.join(lines)
 
@@ -1630,10 +1630,10 @@ async def settle_previous_weeks():
 
 
 WEEKLY_OBJECTIVES = (
-    ('training1', '⚔️ First Flame — 50 XP'),
-    ('training2', '🏃 Fuel the Fire — 50 XP'),
-    ('gym', '🏋️ Flex Text — 25 XP'),
-    ('hobby', '🎮 Skill Share — 25 XP'),
+    ('training1', '⚔️ First Flame  -  50 XP'),
+    ('training2', '🏃 Fuel the Fire  -  50 XP'),
+    ('gym', '🏋️ Flex Text  -  25 XP'),
+    ('hobby', '🎮 Skill Share  -  25 XP'),
 )
 
 
@@ -1695,7 +1695,7 @@ def quest_pause_notice(gid: int, uid: int) -> str:
     """Weekly quest XP status; milestone and Starter rewards are independent."""
     wk = week_key()
     if is_paused(gid, uid, wk):
-        return ('⏸️ **Pause ACTIVE — no Weekly Side Quest XP is earned while paused.** '
+        return ('⏸️ **Pause ACTIVE  -  no Weekly Side Quest XP is earned while paused.** '
                 'Your streak is protected. Use **Pauses** in the Player Hub to resume '
                 'weekly XP; resuming does **not refund** the pause.')
     with connect() as db:
@@ -1703,9 +1703,9 @@ def quest_pause_notice(gid: int, uid: int) -> str:
             'SELECT 1 FROM pauses WHERE guild_id=? AND user_id=? AND week_key=?',
             (gid, uid, wk)).fetchone() is not None
     if used_this_week:
-        return ('▶️ **No active pause — weekly XP earning has resumed.** '
+        return ('▶️ **No active pause  -  weekly XP earning has resumed.** '
                 'Your pause was used and cannot be refunded.')
-    return '✅ **No active pause — weekly quest XP earning is enabled.**'
+    return '✅ **No active pause  -  weekly quest XP earning is enabled.**'
 
 
 # Translate four saved objective flags into a readable member-facing progress panel.
@@ -1716,7 +1716,7 @@ def weekly_progress_text(gid: int, uid: int) -> str:
     return ('⚔️ **Your Weekly Side Quest**\n' + '\n'.join(lines) +
             f'\n**{len(kinds)}/4 objectives completed.**\n' +
             ('🏆 **Automatically turned in!** Your completed week counts toward your streak.'
-             if complete else 'Complete all four to turn in automatically — no button required.') + '\n\n' + quest_pause_notice(gid, uid))
+             if complete else 'Complete all four to turn in automatically  -  no button required.') + '\n\n' + quest_pause_notice(gid, uid))
 
 
 @bot.tree.command(name='weekly_progress',description='See your four weekly quest objectives')
@@ -1769,20 +1769,20 @@ def starter_embed(member=None):
     side_quest = f'<#{SIDE_QUEST_CHANNEL_ID}>' if SIDE_QUEST_CHANNEL_ID else '#side-quest'
     msg_link = (f'https://discord.com/channels/{GUILD_ID}/{WELCOME_CHANNEL_ID}/{WELCOME_MESSAGE_ID}'
                 if WELCOME_CHANNEL_ID and WELCOME_MESSAGE_ID else None)
-    embed.add_field(name='📜 1 · Guild Info — 10 XP',
+    embed.add_field(name='📜 1 · Guild Info  -  10 XP',
                     value=(f'React with any emoji to [this message]({msg_link}) in {welcome}.' if msg_link
                            else f'React with any emoji to the designated message in {welcome}.'), inline=False)
     embed.add_field(name='\u200b', value='\u200b', inline=False)
-    embed.add_field(name='🏋️ 2 · Choose Your Class — 10 XP',
+    embed.add_field(name='🏋️ 2 · Choose Your Class  -  10 XP',
                     value=f'Choose Warrior, Ranger, Mage or Paladin. This can be done in {get_role}.', inline=False)
     embed.add_field(name='\u200b', value='\u200b', inline=False)
-    embed.add_field(name='🎮 3 · Choose Your Proficiency — 10 XP',
+    embed.add_field(name='🎮 3 · Choose Your Proficiency  -  10 XP',
                     value=f'Choose at least one Proficiency. This can be done in {get_role}.', inline=False)
     embed.add_field(name='\u200b', value='\u200b', inline=False)
-    embed.add_field(name='👋 4 · Introduce Yourself — 10 XP',
+    embed.add_field(name='👋 4 · Introduce Yourself  -  10 XP',
                     value=f'Say hello in {intro} (at least 25 characters and 5 words).', inline=False)
     embed.add_field(name='\u200b', value='\u200b', inline=False)
-    embed.add_field(name='👟 5 · First Steps — 10 XP',
+    embed.add_field(name='👟 5 · First Steps  -  10 XP',
                     value=f'Complete any 1 of the 4 Weekly Side Quest objectives in {side_quest}.', inline=False)
     embed.add_field(name='━━━━━━━━━━━━━━━━━━━━', value='​', inline=False)
     embed.add_field(name='Total starter reward', value='**50 XP**', inline=False)
@@ -2092,7 +2092,7 @@ async def publish_role_menu(guild: discord.Guild, channel: discord.TextChannel, 
     heading = '⚔️ CHOOSE YOUR CLASS' if kind == 'gym' else '🔮 CHOOSE YOUR PROFICIENCY'
     desc = ('React to choose your training class. Selecting a different class replaces the previous one.'
             if kind == 'gym' else 'React to select as many proficiencies as you like. Remove a reaction to unselect.')
-    lines = [f'{emoji} — <@&{role_id}>' for emoji, role_id in mapping.items()]
+    lines = [f'{emoji}  -  <@&{role_id}>' for emoji, role_id in mapping.items()]
     embed = discord.Embed(title=heading, description=desc + '\n\n' + '\n\n'.join(lines), color=0x71A7A2)
     embed.set_footer(text='Class & Proficiency roles only · XP ranks are earned automatically')
     msg = await channel.send(embed=embed)
@@ -2152,7 +2152,7 @@ def starter_progress_text(gid: int, uid: int) -> str:
             'SELECT kind FROM starter_claims WHERE guild_id=? AND user_id=?', (gid, uid))}
     labels = [('welcome', 'Guild Info'), ('class', 'Class'), ('hobby', 'Proficiency'),
               ('intro', 'Introduction'), ('first_steps', 'First Steps')]
-    lines = [f'{"✅" if key in claimed else "⬜"} {label} — {STARTER_REWARDS[key]} XP'
+    lines = [f'{"✅" if key in claimed else "⬜"} {label}  -  {STARTER_REWARDS[key]} XP'
              for key, label in labels]
     return '🛡️ **Your Starter Quest**\n' + '\n'.join(lines) + f'\n**{len(set(STARTER_REWARDS) & claimed)}/5 objectives completed.**' + '\n\n' + quest_pause_notice(gid, uid)
 
@@ -2284,7 +2284,7 @@ def purchase_order_summary(gid: int, uid: int) -> dict:
 def order_xp_embed(gid: int, uid: int) -> discord.Embed:
     summary = purchase_order_summary(gid, uid)
     embed = discord.Embed(
-        title='✦ GYMGUILD — ORDER XP',
+        title='✦ GYMGUILD  -  ORDER XP',
         description=('Submit your GYMGUILD Shopify order number for moderator review. '
                      f'Your **first approved order** can earn **{MILESTONE_XP["purchase1"]} XP** '
                      'when approved. Rejected or cancelled requests can be retried until approved.'),
@@ -2310,14 +2310,14 @@ def order_xp_embed(gid: int, uid: int) -> discord.Embed:
         status_icons = {'approved': '✅', 'pending': '⏳', 'rejected': '❌', 'cancelled': '🚫', 'test_reset': '🧪'}
         lines = [
             f"{status_icons.get(order['status'], '•')} "
-            f"`{discord.utils.escape_markdown(order['order_reference'])}` — "
+            f"`{discord.utils.escape_markdown(order['order_reference'])}`  -  "
             f"{order['status'].title()}"
             for order in summary['orders']
         ]
         embed.add_field(name='Your submitted orders (latest 8)', value='\n'.join(lines), inline=False)
     else:
         embed.add_field(name='Your submitted orders', value='No orders submitted yet.', inline=False)
-    embed.set_footer(text='Only GuildKeeper submissions are counted — not all Shopify orders.')
+    embed.set_footer(text='Only GuildKeeper submissions are counted  -  not all Shopify orders.')
     return embed
 
 
@@ -2480,7 +2480,7 @@ async def post_purchase_review(guild: discord.Guild, user_id: int, order_id: int
     reference = discord.utils.escape_mentions(
         discord.utils.escape_markdown(row['order_reference']))
     embed = discord.Embed(
-        title='🛍️ ORDER XP — REVIEW REQUIRED',
+        title='🛍️ ORDER XP  -  REVIEW REQUIRED',
         description=(f'Member: <@{user_id}>\nOrder reference: **{reference}**\n'
                      + ('✅ Shopify API checked: paid, uncancelled; supplied email matches. '
                         'Still confirm ownership before approving.\n'
@@ -2520,7 +2520,7 @@ async def submit_order_from_interaction(interaction: discord.Interaction, refere
     elif status == 'pending':
         message = '⏳ Your Order XP request is pending. Cancel it from the private status panel to submit another.'
     elif status == 'approved':
-        message = '✅ Order XP granted — milestone objective complete.'
+        message = '✅ Order XP granted  -  milestone objective complete.'
     elif status == 'rejected':
         message = '❌ Your request was rejected. You may submit a new order number.'
     elif status == 'used_reference':
@@ -2538,7 +2538,7 @@ async def submit_order_from_interaction(interaction: discord.Interaction, refere
 
 def milestone_board_embed() -> discord.Embed:
     embed = discord.Embed(
-        title='✦ GYMGUILD — MILESTONE QUESTS ✦',
+        title='✦ GYMGUILD  -  MILESTONE QUESTS ✦',
         description=(
             'Complete special Guild achievements to earn permanent one-time XP rewards. '
             'Select **My Progress** to view what you have unlocked privately, '
@@ -2549,7 +2549,7 @@ def milestone_board_embed() -> discord.Embed:
     )
     for kind, name, xp, description in MILESTONE_QUESTS:
         embed.add_field(
-            name=f'{MILESTONE_EMOJI[kind]} {name} — {xp} XP',
+            name=f'{MILESTONE_EMOJI[kind]} {name}  -  {xp} XP',
             value=description + '\n\u200b',
             inline=False,
         )
@@ -2574,7 +2574,7 @@ def boost_milestone_message(gid: int, uid: int, currently_boosting: bool) -> str
             ).fetchone()
         amount = f'{total["amount"]} XP granted' if total else 'XP reward claimed'
         return (
-            f'💎 **Boost milestone complete — {amount}!** '
+            f'💎 **Boost milestone complete  -  {amount}!** '
             'Thank you for supporting GYMGUILD and helping our community grow. ✦'
         )
     if currently_boosting:
@@ -2715,7 +2715,7 @@ async def open_order_submission(interaction: discord.Interaction) -> None:
     status = order_submission_status(interaction.guild_id, interaction.user.id)
     if status == 'approved':
         return await interaction.response.send_message(
-            '✅ **Order XP granted — milestone objective complete.**',
+            '✅ **Order XP granted  -  milestone objective complete.**',
             ephemeral=True,
         )
     if status == 'pending':
@@ -2775,7 +2775,7 @@ class OrderXPView(discord.ui.View):
             notice = ('🚫 **Order XP request cancelled.** No XP awarded. '
                       'You can submit a replacement through the public Milestone Quests panel.')
         elif result == 'approved':
-            notice = '✅ Order XP granted — milestone objective complete. Approved orders cannot be cancelled.'
+            notice = '✅ Order XP granted  -  milestone objective complete. Approved orders cannot be cancelled.'
         else:
             notice = 'There is no pending Order XP request to cancel.'
         self.update_controls(interaction.guild_id)
@@ -2796,7 +2796,7 @@ async def mark_cancelled_mod_review(guild, channel_id, message_id, order_id):
         msg = await channel.fetch_message(message_id)
         embed = msg.embeds[0].copy() if msg.embeds else None
         if embed:
-            embed.add_field(name='Decision', value='🚫 Cancelled by member — no XP awarded.', inline=False)
+            embed.add_field(name='Decision', value='🚫 Cancelled by member  -  no XP awarded.', inline=False)
         await msg.edit(embed=embed, view=None)
     except (discord.NotFound, discord.Forbidden, discord.HTTPException):
         log.warning('Could not retire cancelled order review card %s', order_id)
@@ -2883,7 +2883,7 @@ async def admin_milestone_pending(interaction: discord.Interaction):
     if not rows:
         return await interaction.response.send_message('✅ No pending orders.', ephemeral=True)
     lines = [
-        f'<@{row["user_id"]}> — `{discord.utils.escape_markdown(row["order_reference"])}` '
+        f'<@{row["user_id"]}>  -  `{discord.utils.escape_markdown(row["order_reference"])}` '
         f'(order #{row["id"]})'
         for row in rows
     ]
@@ -2967,7 +2967,7 @@ async def create_reward_ticket(interaction: discord.Interaction, rank: str):
         await channel.delete(reason='Failed to save reward ticket')
         return await interaction.followup.send('Unable to save the ticket. Please try again.', ephemeral=True)
     await channel.send(
-        f'✦ **{rank} reward — {REWARD_RANKS[rank]}% off**\n'
+        f'✦ **{rank} reward  -  {REWARD_RANKS[rank]}% off**\n'
         f'Requested by {interaction.user.mention}.\n\n'
         'An admin will generate a one-use Shopify discount code and share it privately here. '
         'A moderator can mark the reward fulfilled using the panel below. '
@@ -3211,9 +3211,9 @@ async def expire_reward_tickets():
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(member='Member whose reward request will be reset', rank='Reward rank to reset')
 @app_commands.choices(rank=[
-    app_commands.Choice(name='Master — 10% off', value='Master'),
-    app_commands.Choice(name='Legend — 15% off', value='Legend'),
-    app_commands.Choice(name='Paragon — 20% off', value='Paragon'),
+    app_commands.Choice(name='Master  -  10% off', value='Master'),
+    app_commands.Choice(name='Legend  -  15% off', value='Legend'),
+    app_commands.Choice(name='Paragon  -  20% off', value='Paragon'),
 ])
 async def admin_reward_reset(interaction: discord.Interaction, member: discord.Member,
                              rank: app_commands.Choice[str]):
@@ -3246,7 +3246,7 @@ async def admin_reward_reset(interaction: discord.Interaction, member: discord.M
     if isinstance(log_channel, discord.TextChannel):
         embed = discord.Embed(title='✦ Reward Request Reset', colour=discord.Colour.orange(), timestamp=utc_now())
         embed.add_field(name='Member', value=f'{member.mention} (`{member.id}`)', inline=False)
-        embed.add_field(name='Reward', value=f'{rank.value} — {REWARD_RANKS[rank.value]}% off', inline=True)
+        embed.add_field(name='Reward', value=f'{rank.value}  -  {REWARD_RANKS[rank.value]}% off', inline=True)
         embed.add_field(name='Previous status', value=ticket['status'], inline=True)
         embed.add_field(name='Reset by', value=interaction.user.mention, inline=False)
         embed.add_field(name='Ticket channel', value=f'`{ticket["channel_id"]}`', inline=False)
@@ -3328,19 +3328,19 @@ def weekly_board_embed():
     """The same four objectives that the message tracker awards XP for."""
     reset = next_reset()
     embed = discord.Embed(
-        title='✦ GYMGUILD — WEEKLY SIDE QUEST',
+        title='✦ GYMGUILD  -  WEEKLY SIDE QUEST',
         description='A new quest week has begun! Complete all four objectives to earn **200 XP**.',
         colour=discord.Colour.from_rgb(104, 163, 153),
     )
-    embed.add_field(name='⚔️ 1 · First Flame — 50 XP', value='Post a training activity in <#%s> **with an image or file attached as evidence**.' % TRAINING_LOG_CHANNEL_ID, inline=False)
+    embed.add_field(name='⚔️ 1 · First Flame  -  50 XP', value='Post a training activity in <#%s> **with an image or file attached as evidence**.' % TRAINING_LOG_CHANNEL_ID, inline=False)
     embed.add_field(name='\u200b', value='\u200b', inline=False)
-    embed.add_field(name='🏃 2 · Fuel the Fire — 50 XP', value='Post a second training activity in <#%s> **with an image or file attached as evidence**, on a **different UK calendar day**.' % TRAINING_LOG_CHANNEL_ID, inline=False)
+    embed.add_field(name='🏃 2 · Fuel the Fire  -  50 XP', value='Post a second training activity in <#%s> **with an image or file attached as evidence**, on a **different UK calendar day**.' % TRAINING_LOG_CHANNEL_ID, inline=False)
     embed.add_field(name='\u200b', value='\u200b', inline=False)
-    embed.add_field(name='🏋️ 3 · Flex Text — 25 XP', value='Post a message in any channel within ✦ THE FORGE ✦.', inline=False)
+    embed.add_field(name='🏋️ 3 · Flex Text  -  25 XP', value='Post a message in any channel within ✦ THE FORGE ✦.', inline=False)
     embed.add_field(name='\u200b', value='\u200b', inline=False)
-    embed.add_field(name='🎮 4 · Skill Share — 25 XP', value='Post a message in any channel within ✦ OFF THE CLOCK ✦.', inline=False)
+    embed.add_field(name='🎮 4 · Skill Share  -  25 XP', value='Post a message in any channel within ✦ OFF THE CLOCK ✦.', inline=False)
     embed.add_field(name='​', value='​', inline=False)
-    embed.add_field(name='🏆 Completion bonus — 50 XP', value='Complete all four objectives to claim the bonus automatically.', inline=False)
+    embed.add_field(name='🏆 Completion bonus  -  50 XP', value='Complete all four objectives to claim the bonus automatically.', inline=False)
     embed.add_field(name='━━━━━━━━━━━━━━━━━━━━', value='**Your progress & information**', inline=False)
     embed.add_field(name='Track your progress', value='Complete all four objectives to **automatically turn in your weekly quest** and advance your streak. The **Turn In Quest** button confirms your completion and shows your streak. Use **View Progress**, `/weekly_progress`, `/streak` or `/pause_status`. Messages must be meaningful (at least 25 characters and 5 words).', inline=False)
     embed.add_field(name='Next reset', value=f'<t:{int(reset.timestamp())}:F> · <t:{int(reset.timestamp())}:R>', inline=False)
@@ -3404,13 +3404,13 @@ def leaderboard_embed():
             'SELECT user_id, xp FROM members WHERE guild_id=? ORDER BY xp DESC, user_id LIMIT 10',
             (GUILD_ID,)).fetchall()
     embed = discord.Embed(
-        title='🏆 GYMGUILD — LEADERBOARD',
+        title='🏆 GYMGUILD  -  LEADERBOARD',
         description='Top 10 Guild members ranked by total XP.',
         color=0x71A7A2)
     if rows:
         for position, row in enumerate(rows, 1):
             embed.add_field(
-                name=f'#{position} — {row["xp"]:,} XP',
+                name=f'#{position}  -  {row["xp"]:,} XP',
                 value=f'<@{row["user_id"]}>', inline=False)
     else:
         embed.add_field(name='No rankings yet', value='Earn XP by completing quests!', inline=False)
@@ -3464,7 +3464,7 @@ PLAYER_STATS_CHANNEL_ID = int(os.getenv('PLAYER_STATS_CHANNEL_ID', '0') or 0)
 
 def player_stats_embed():
     embed = discord.Embed(
-        title='✦ GYMGUILD — PLAYER HUB',
+        title='✦ GYMGUILD  -  PLAYER HUB',
         description=('Welcome to your Guildkeeper player hub! Select a button below '
                      'to privately view your stats, quests, ranks and Inbox, manage pauses, and choose notification settings.'),
         color=0x71A7A2)
@@ -3488,7 +3488,7 @@ def profile_progress_text(gid: int, uid: int, display_name: str) -> str:
                 if next_rank else 'Maximum rank reached ✦')
     notice = streak_blocked_rank_notice(gid, uid, xp)
     return (
-        f'✦ **{display_name}** — Rank: **{rank_for(xp, gid, uid)}** · XP: **{xp}**\n'
+        f'✦ **{display_name}**  -  Rank: **{rank_for(xp, gid, uid)}** · XP: **{xp}**\n'
         f'🎯 Lifetime objectives completed: **{lifetime_objectives(gid, uid)}**\n'
         f'Longest streak: **{longest_streak(gid, uid)} weeks**\n\n'
         f'**Rewards**\n{reward_eligibility_text(gid, uid)}\n{upcoming}'
@@ -3498,14 +3498,14 @@ def profile_progress_text(gid: int, uid: int, display_name: str) -> str:
 
 def streak_progress_text(gid: int, uid: int) -> str:
     return (
-        f'🔥 **Your Weekly Streak** — Completed weeks: **{completed_weeks(gid, uid)}** '
+        f'🔥 **Your Weekly Streak**  -  Completed weeks: **{completed_weeks(gid, uid)}** '
         f'· Current streak: **{active_streak(gid, uid)}**. '
         'Paused weeks preserve but do not increase your streak.'
     )
 
 
 def ranks_progress_embed(gid: int, uid: int) -> discord.Embed:
-    embed = discord.Embed(title='✦ GYMGUILD — RANKS', color=0x71A7A2)
+    embed = discord.Embed(title='✦ GYMGUILD  -  RANKS', color=0x71A7A2)
     for name, threshold in RANKS:
         requirement = (f'{threshold:,} XP + **{STREAK_REQUIREMENTS[name]}-week active streak**'
                        if name in STREAK_REQUIREMENTS else f'{threshold:,} XP')
@@ -3683,7 +3683,7 @@ def all_quests_embed(guild: discord.Guild, uid: int) -> discord.Embed:
     forge_channel = quest_category_link(guild, GYM_CATEGORY_ID, 'a channel in ✦ THE FORGE ✦')
     hobby_channel = quest_category_link(guild, HOBBY_CATEGORY_ID, 'a channel in ✦ OFF THE CLOCK ✦')
     embed = discord.Embed(
-        title='✦ GYMGUILD — ALL QUESTS',
+        title='✦ GYMGUILD  -  ALL QUESTS',
         description=('Track your Guild quests and find their channels here. '
                      '**Starter Quests are not included.** Your progress is visible only to you.'),
         colour=discord.Colour.from_rgb(104, 163, 153),
@@ -3694,12 +3694,12 @@ def all_quests_embed(guild: discord.Guild, uid: int) -> discord.Embed:
         ('gym', 'Flex Text', f'Post a meaningful message in {forge_channel} (The Forge).'),
         ('hobby', 'Skill Share', f'Post a meaningful message in {hobby_channel} (Off The Clock).'),
     ]
-    items = [f'{"✅" if key in kinds else "⬜"} **{title}** — {description}'
+    items = [f'{"✅" if key in kinds else "⬜"} **{title}**  -  {description}'
              for key, title, description in requirements]
-    note = ('⏸️ Paused — weekly XP cannot be earned until resumed.'
+    note = ('⏸️ Paused  -  weekly XP cannot be earned until resumed.'
             if paused else 'All four objectives automatically award the 50 XP completion bonus.')
     embed.add_field(
-        name=f'⚔️ Weekly Side Quest — {len(kinds)}/4 objectives',
+        name=f'⚔️ Weekly Side Quest  -  {len(kinds)}/4 objectives',
         value=('Complete four objectives each week for up to **200 XP**, including '
                'the completion bonus. Resets Monday 00:00 UK time.\n\n'
                + '\n'.join(items) + '\n\n' + note
@@ -3708,9 +3708,9 @@ def all_quests_embed(guild: discord.Guild, uid: int) -> discord.Embed:
     milestone_lines = []
     for key, label, xp, description in MILESTONE_QUESTS:
         milestone_lines.append(
-            f'{"✅" if key in progress["claimed"] else "⬜"} **{label}** (+{xp} XP) — {description}')
+            f'{"✅" if key in progress["claimed"] else "⬜"} **{label}** (+{xp} XP)  -  {description}')
     embed.add_field(
-        name=f'🏆 Milestone Quests — {progress["completed"]}/{progress["total"]} completed',
+        name=f'🏆 Milestone Quests  -  {progress["completed"]}/{progress["total"]} completed',
         value=('Permanent one-time achievements for training streaks, boosting the Guild '
                'and your first verified Shopify purchase.\n\n'
                + '\n'.join(milestone_lines)),
@@ -3833,7 +3833,7 @@ class PlayerStatsView(discord.ui.View):
             return await interaction.response.send_message('Guild Blast is not configured. Ask an admin to set GUILD_BLAST_ROLE_ID.', ephemeral=True)
         enabled = role in interaction.user.roles
         await interaction.response.send_message(
-            f'🔔 **Guild Blast** — Currently **{"enabled" if enabled else "disabled"}**.\n'
+            f'🔔 **Guild Blast**  -  Currently **{"enabled" if enabled else "disabled"}**.\n'
             'Guild Blast is an optional role used for announcements by admins and Guildkeeper. '
             'Choose below to change your preference.',
             view=GuildBlastToggleView(interaction.user.id, enabled), ephemeral=True)
@@ -3898,18 +3898,18 @@ def pause_panel_text(gid: int, uid: int) -> str:
     paused_now = is_paused(gid, uid, current_week)
     remaining = max(0, 2 - used)
     if paused_now:
-        status = '⏸️ **Active pause — XP collection is suspended.**'
+        status = '⏸️ **Active pause  -  XP collection is suspended.**'
         explanation = ('Your current Weekly Side Quest is paused. Weekly activity will not earn XP '
                        'until you resume. Your streak is protected for this week.')
     elif spent_current:
-        status = '▶️ **XP collection resumed — pause already used this week.**'
+        status = '▶️ **XP collection resumed  -  pause already used this week.**'
         explanation = ('You can earn weekly XP again, but this week\'s pause remains spent. '
                        'It cannot be refunded or activated again this week.')
     else:
-        status = '✅ **No active pause — XP collection is enabled.**'
+        status = '✅ **No active pause  -  XP collection is enabled.**'
         explanation = 'You can earn weekly XP normally.'
     return (
-        '⏸️ **GYMGUILD — YOUR PAUSES**\n'
+        '⏸️ **GYMGUILD  -  YOUR PAUSES**\n'
         f'**Pauses remaining:** {remaining}/2 (rolling 13 weeks)\n'
         f'**Current week:** {current_week}\n'
         f'{status}\n{explanation}\n'
