@@ -2130,7 +2130,7 @@ class PurchaseReviewView(discord.ui.View):
         if interaction.guild_id != GUILD_ID:
             await interaction.response.send_message('Not available in this server.', ephemeral=True)
             return False
-        if not interaction.user.guild_permissions.manage_guild:
+        if not is_ticket_mod(interaction):
             await interaction.response.send_message('Only moderators can review orders.', ephemeral=True)
             return False
         return True
