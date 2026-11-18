@@ -48,9 +48,17 @@ def initialize():
           guild_id INTEGER NOT NULL, kind TEXT NOT NULL,
           channel_id INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
           title TEXT NOT NULL DEFAULT '', intro TEXT NOT NULL DEFAULT '',
+          ping_guildblast INTEGER NOT NULL DEFAULT 0,
           updated_by INTEGER NOT NULL, updated_at TEXT NOT NULL,
           PRIMARY KEY (guild_id,kind)
         )""")
+        # Existing deployments have the automation table without the ping column.
+        # Altering rather than replacing it keeps everyone's current settings.
+        columns = {row["name"] for row in
+                   db.execute("PRAGMA table_info(scheduler_automations)")}
+        if "ping_guildblast" not in columns:
+            db.execute("ALTER TABLE scheduler_automations "
+                       "ADD COLUMN ping_guildblast INTEGER NOT NULL DEFAULT 0")
 
 
 # Turn the moderator's typed date into a timezone-aware UK date; reject invalid clock-change times.
@@ -331,14 +339,15 @@ def automation_policy(kind):
     row=automation(kind)
     if row is not None:
         return {"enabled":bool(row["enabled"]),"channel_id":row["channel_id"],
-                "title":row["title"],"intro":row["intro"],"configured":True}
+                "title":row["title"],"intro":row["intro"],
+                "ping_guildblast":bool(row["ping_guildblast"]),"configured":True}
     shop_kind=kind in ("shop_new","shop_sale")
     enabled=(api.shopify_events.enabled() if shop_kind else True)
     return {"enabled":enabled,"channel_id":api.ANNOUNCEMENTS_CHANNEL_ID,
-            "title":"","intro":"","configured":False}
+            "title":"","intro":"","ping_guildblast":False,"configured":False}
 
 
-def save_automation(kind,channel_id,title,intro,enabled,actor):
+def save_automation(kind,channel_id,title,intro,enabled,actor,ping_guildblast=False):
     """One row per event type. Saving never triggers an announcement immediately."""
     if kind not in AUTOMATION_KINDS:
         raise ValueError("Unknown automation type.")
@@ -347,16 +356,18 @@ def save_automation(kind,channel_id,title,intro,enabled,actor):
     initialize()
     with api.connect() as db:
         db.execute("""INSERT INTO scheduler_automations
-          (guild_id,kind,channel_id,enabled,title,intro,updated_by,updated_at)
-          VALUES (?,?,?,?,?,?,?,?)
+          (guild_id,kind,channel_id,enabled,title,intro,ping_guildblast,
+           updated_by,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?)
           ON CONFLICT(guild_id,kind) DO UPDATE SET
           channel_id=excluded.channel_id,enabled=excluded.enabled,
           title=excluded.title,intro=excluded.intro,
+          ping_guildblast=excluded.ping_guildblast,
           updated_by=excluded.updated_by,updated_at=excluded.updated_at""",
           (api.GUILD_ID,kind,channel_id,int(bool(enabled)),
            discord.utils.escape_mentions(title.strip()),
            discord.utils.escape_mentions(intro.strip()),
-           actor,api.utc_now().isoformat()))
+           int(bool(ping_guildblast)),actor,api.utc_now().isoformat()))
 
 
 def set_automation_enabled(kind,enabled,actor):
@@ -384,7 +395,9 @@ async def configured_notice(kind,key,title,body):
         title=policy["title"]
     if policy["intro"]:
         body=policy["intro"]+"\n\n"+body
-    return await automatic_event(key,title,body,policy["channel_id"])
+    return await automatic_event(
+        key,title,body,policy["channel_id"],
+        ping_guildblast=policy["ping_guildblast"])
 
 
 def timeline(now=None,limit=15):
@@ -428,7 +441,7 @@ def timeline(now=None,limit=15):
 
 
 # Use a unique event key to prevent automatic notices duplicating across restarts.
-async def automatic_event(key, title, body, channel_id):
+async def automatic_event(key, title, body, channel_id, ping_guildblast=False):
     """Exactly one attempt per event; uncertain sends require manual attention."""
     initialize()
     now=api.utc_now()
@@ -445,9 +458,16 @@ async def automatic_event(key, title, body, channel_id):
     err=None
     try:
         guild=api.bot.get_guild(api.GUILD_ID)
-        channel=check_channel(guild,channel_id)
-        msg=await channel.send(embed=embed(title,body),
-                               allowed_mentions=discord.AllowedMentions.none())
+        channel=check_channel(guild,channel_id,ping=ping_guildblast)
+        role=(guild.get_role(api.GUILD_BLAST_ROLE_ID) if ping_guildblast else None)
+        # Put the role mention outside the embed. Discord does not ping from
+        # embeds, and allowed_mentions must explicitly permit this one role.
+        msg=await channel.send(
+            content=role.mention if role else None,
+            embed=embed(title,body),
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False,users=False,roles=[role] if role else False,
+                replied_user=False))
         mid=msg.id
     except (discord.HTTPException,ValueError) as exc:
         err=type(exc).__name__+": "+str(exc)[:180]
