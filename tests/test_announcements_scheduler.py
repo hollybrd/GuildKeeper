@@ -26,7 +26,7 @@ class AnnouncementSchedulerTests(unittest.IsolatedAsyncioTestCase):
         schedule.api=bot
         announcement_ui.api=bot
         schedule.initialize()
-        self.guild=SimpleNamespace(id=bot.GUILD_ID)
+        self.guild=SimpleNamespace(id=bot.GUILD_ID, get_channel=lambda cid: None)
         self.now=datetime(2026,11,18,10,tzinfo=timezone.utc)
 
     def tearDown(self):
