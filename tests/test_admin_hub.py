@@ -78,6 +78,10 @@ class PermissionChecks(unittest.IsolatedAsyncioTestCase):
         response.send_message.assert_awaited_once()
         self.assertEqual(response.send_message.await_args.kwargs['ephemeral'], True)
 
+class FakeChannel:
+    pass
+
+
 class AdminHubChannelSelectionTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -99,7 +103,8 @@ class AdminHubChannelSelectionTests(unittest.IsolatedAsyncioTestCase):
             me=SimpleNamespace(),
             get_channel=lambda cid: self.channel if cid == channel_id else None,
         )
-        channel = SimpleNamespace(id=channel_id, guild=guild, mention='<#345>')
+        channel = FakeChannel()
+        channel.id, channel.guild, channel.mention = channel_id, guild, '<#345>'
         channel.permissions_for = lambda role: SimpleNamespace(
             view_channel=public if role is guild.default_role else True,
             send_messages=True, embed_links=True, read_message_history=True)
@@ -110,7 +115,7 @@ class AdminHubChannelSelectionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_public_channel_is_rejected_without_posting(self):
         guild, channel = self.make_channel(public=True)
-        with patch.object(discord, 'TextChannel', SimpleNamespace), patch.object(bot.bot, 'get_guild', return_value=guild):
+        with patch.object(discord, 'TextChannel', FakeChannel), patch.object(bot.bot, 'get_guild', return_value=guild):
             ok, message = await admin_hub.post_admin_hub(channel)
         self.assertFalse(ok)
         self.assertIn('visible to @everyone', message)
@@ -118,7 +123,7 @@ class AdminHubChannelSelectionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_selected_private_channel_is_saved(self):
         guild, channel = self.make_channel()
-        with patch.object(discord, 'TextChannel', SimpleNamespace), patch.object(bot.bot, 'get_guild', return_value=guild):
+        with patch.object(discord, 'TextChannel', FakeChannel), patch.object(bot.bot, 'get_guild', return_value=guild):
             ok, message = await admin_hub.post_admin_hub(channel)
         self.assertTrue(ok, message)
         channel.send.assert_awaited_once()
@@ -135,7 +140,7 @@ class AdminHubChannelSelectionTests(unittest.IsolatedAsyncioTestCase):
         old_message = SimpleNamespace(id=555, edit=AsyncMock(), delete=AsyncMock())
         channel.fetch_message = AsyncMock(return_value=old_message)
         # Same channel: edit existing message rather than posting duplicates.
-        with patch.object(discord, 'TextChannel', SimpleNamespace), patch.object(bot.bot, 'get_guild', return_value=guild):
+        with patch.object(discord, 'TextChannel', FakeChannel), patch.object(bot.bot, 'get_guild', return_value=guild):
             ok, message = await admin_hub.post_admin_hub(channel)
         self.assertTrue(ok, message)
         old_message.edit.assert_awaited_once()
