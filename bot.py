@@ -1643,17 +1643,119 @@ async def admin_starter_award(interaction:discord.Interaction,member:discord.Mem
     await reply(interaction,f'{"Awarded" if ok else "Already claimed"}: {action.name} for {member.mention}.')
 
 
-@bot.tree.command(name='admin_milestone_review',description='Moderator: approve or reject a first-purchase milestone')
-@app_commands.checks.has_permissions(manage_guild=True)
-async def admin_milestone_review(interaction:discord.Interaction,member:discord.Member,approve:bool):
+def submit_first_purchase_milestone(gid: int, uid: int, reference: str) -> str:
+    """Store a manual purchase request once, preserving any approved milestone.
+
+    An existing rejection may be resubmitted, but an approved/pending request
+    and a previously granted purchase XP claim cannot be overwritten.
+    """
+    reference = reference.strip()
+    if not reference or len(reference) > 80 or any(ord(char) < 32 for char in reference):
+        return 'invalid'
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
-        pending=db.execute('SELECT status FROM pending_milestones WHERE guild_id=? AND user_id=? AND kind="purchase1"',(interaction.guild_id,member.id)).fetchone()
-        if not pending or pending['status']!='pending': return await reply(interaction,'No pending purchase milestone for this member.')
-        db.execute('UPDATE pending_milestones SET status=? WHERE guild_id=? AND user_id=? AND kind="purchase1"',('approved' if approve else 'rejected',interaction.guild_id,member.id))
-        if approve: grant_once(db,'milestone_claims',interaction.guild_id,member.id,'purchase1',50)
-    if approve: await update_rank(member,get_xp(interaction.guild_id,member.id))
-    await reply(interaction,f'Purchase milestone {"approved (+50 XP)" if approve else "rejected"} for {member.mention}.')
+        claimed = db.execute(
+            'SELECT 1 FROM milestone_claims WHERE guild_id=? AND user_id=? AND kind=?',
+            (gid, uid, 'purchase1'),
+        ).fetchone()
+        if claimed:
+            return 'awarded'
+        existing = db.execute(
+            'SELECT status FROM pending_milestones WHERE guild_id=? AND user_id=? AND kind=?',
+            (gid, uid, 'purchase1'),
+        ).fetchone()
+        if existing and existing['status'] == 'pending':
+            return 'pending'
+        if existing and existing['status'] == 'approved':
+            return 'awarded'
+        db.execute(
+            'INSERT INTO pending_milestones(guild_id,user_id,kind,evidence,status,created_at) '
+            'VALUES (?,?,?,?,?,?) '
+            'ON CONFLICT(guild_id,user_id,kind) DO UPDATE SET '
+            'evidence=excluded.evidence,status=excluded.status,created_at=excluded.created_at',
+            (gid, uid, 'purchase1', reference, 'pending', utc_now().isoformat()),
+        )
+    return 'submitted'
+
+
+@bot.tree.command(
+    name='milestone_purchase',
+    description='Submit your first GYMGUILD order reference for a one-time 50 XP reward',
+)
+@app_commands.guild_only()
+@app_commands.describe(order_reference='Shopify order number only — do not include personal or payment details')
+async def milestone_purchase(interaction: discord.Interaction, order_reference: str):
+    if interaction.guild_id != GUILD_ID or not isinstance(interaction.user, discord.Member):
+        return await interaction.response.send_message(
+            'This command is only available in the GYMGUILD server.', ephemeral=True)
+    if not order_reference.strip() or len(order_reference.strip()) > 80 or any(
+        ord(char) < 32 for char in order_reference
+    ):
+        return await interaction.response.send_message(
+            'Enter an order reference of 1–80 characters. Do not include names, '
+            'addresses, emails or payment details.', ephemeral=True)
+    result = submit_first_purchase_milestone(
+        interaction.guild_id, interaction.user.id, order_reference)
+    if result == 'awarded':
+        message = '🎁 Your one-time first-purchase milestone has already been awarded.'
+    elif result == 'pending':
+        message = '⏳ Your first-purchase request is already awaiting admin review.'
+    elif result == 'submitted':
+        message = ('✅ **First-purchase milestone submitted!** Your order reference '
+                   'is saved privately for moderator verification. You will earn '
+                   '**50 XP** if approved. Please do not submit personal or payment details.')
+        mod_channel = interaction.guild.get_channel(MOD_REVIEW_CHANNEL_ID) if MOD_REVIEW_CHANNEL_ID else None
+        if isinstance(mod_channel, discord.TextChannel):
+            try:
+                await mod_channel.send(
+                    '🛍️ **First-purchase milestone pending review**\n'
+                    f'Member: {interaction.user.mention}\n'
+                    'Use **/admin_milestone_review** to approve or reject their request. '
+                    'Order reference is stored in the private GuildKeeper database.',
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                log.warning('Unable to alert moderators about pending purchase milestone')
+    else:
+        message = 'Invalid order reference. Please provide a reference of 1–80 characters.'
+    await interaction.response.send_message(message, ephemeral=True)
+
+
+def review_first_purchase_milestone(gid: int, uid: int, approve: bool) -> str:
+    """Atomically decide a pending first-purchase request, awarding XP at most once."""
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        pending = db.execute(
+            'SELECT status FROM pending_milestones WHERE guild_id=? AND user_id=? AND kind=?',
+            (gid, uid, 'purchase1'),
+        ).fetchone()
+        if not pending or pending['status'] != 'pending':
+            return 'not_pending'
+        db.execute(
+            'UPDATE pending_milestones SET status=? WHERE guild_id=? AND user_id=? AND kind=?',
+            ('approved' if approve else 'rejected', gid, uid, 'purchase1'),
+        )
+        if approve:
+            awarded = grant_once(db, 'milestone_claims', gid, uid, 'purchase1', 50)
+            return 'awarded' if awarded else 'already_awarded'
+    return 'rejected'
+
+
+@bot.tree.command(name='admin_milestone_review',description='Moderator: approve or reject a first-purchase milestone')
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def admin_milestone_review(interaction:discord.Interaction,member:discord.Member,approve:bool):
+    if interaction.guild_id != GUILD_ID:
+        return await reply(interaction, 'This command belongs to the GYMGUILD server.')
+    result = review_first_purchase_milestone(interaction.guild_id, member.id, approve)
+    if result == 'not_pending':
+        return await reply(interaction, 'No pending purchase milestone for this member.')
+    if result == 'awarded':
+        await update_rank(member, get_xp(interaction.guild_id, member.id))
+        return await reply(interaction, f'✅ First-purchase milestone approved: **+50 XP** for {member.mention}.')
+    if result == 'already_awarded':
+        return await reply(interaction, f'✅ Purchase approved, but {member.mention} already received the 50 XP. No duplicate XP granted.')
+    return await reply(interaction, f'❌ First-purchase milestone rejected for {member.mention}. They may resubmit their order reference.')
 
 
 
