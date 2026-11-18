@@ -1810,8 +1810,8 @@ def order_xp_embed(gid: int, uid: int) -> discord.Embed:
     embed = discord.Embed(
         title='✦ GYMGUILD — ORDER XP',
         description=('Submit your GYMGUILD Shopify order number for moderator review. '
-                     f'Only your **first approved order** awards **{MILESTONE_XP["purchase1"]} XP**. '
-                     'Later orders may be tracked, but do not earn extra XP.'),
+                     f'Your **single lifetime Order XP request** can earn **{MILESTONE_XP["purchase1"]} XP** '
+                     'when approved. You cannot submit another request after a decision.'),
         colour=discord.Colour.from_rgb(104, 163, 153),
     )
     embed.add_field(name='✅ Approved orders', value=str(summary['approved']), inline=True)
@@ -1976,7 +1976,7 @@ async def submit_order_from_interaction(interaction: discord.Interaction, refere
                    + ('A moderator will verify it in Shopify.' if notified else
                       'Your submission is saved, but the moderator review channel needs configuring.'))
     elif status == 'pending':
-        message = '⏳ You already have an order awaiting moderator review.'
+        message = '⏳ Your one-time Order XP request is already awaiting moderator review.'
     elif status == 'approved':
         message = '✅ Order XP granted — milestone objective complete.'
     elif status == 'rejected':
@@ -1998,7 +1998,7 @@ def milestone_board_embed() -> discord.Embed:
         description=(
             'Complete special Guild achievements to earn permanent one-time XP rewards. '
             'Select **My Progress** to view what you have unlocked privately, '
-            'or **Submit Order XP** to send a Shopify order for moderator approval.\n\n'
+            'or **Submit Order XP** to send your one-time Shopify order request for approval.\n\n'
             '**All six milestones unlock a one-time +500 XP Main Quest Completion bonus!**'
         ),
         colour=discord.Colour.from_rgb(104, 163, 153),
