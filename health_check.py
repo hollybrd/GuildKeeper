@@ -4,6 +4,7 @@ This is a point-in-time check, not a guarantee that all future events succeed.
 """
 import discord
 import panel_health
+import admin_maintenance
 
 CHANNELS = (
     ('Player Hub', 'PLAYER_STATS_CHANNEL_ID', 'send'),
@@ -76,6 +77,27 @@ def check_runtime(api, guild):
     except Exception as exc:
         checks.append(status('Scheduled jobs', 'unknown',
                              'Could not inspect scheduler: ' + type(exc).__name__))
+    try:
+        statuses = admin_maintenance.job_statuses(api)
+        expected = ('weekly_settlement', 'streak_warnings', 'notifications',
+                    'weekly_board', 'leaderboard', 'reward_ticket_expiry')
+        now = api.utc_now()
+        for name in expected:
+            record = statuses.get(name)
+            if record is None:
+                checks.append(status('Job: ' + name, 'unknown', 'No recorded run yet'))
+                continue
+            stamp = api.datetime.fromisoformat(record['timestamp']) if hasattr(api, 'datetime') else None
+            if not record.get('success'):
+                checks.append(status('Job: ' + name, 'problem',
+                                     'Latest run failed: ' + str(record.get('error') or 'Unknown error')))
+            elif stamp is not None and (now - stamp).total_seconds() > 300:
+                checks.append(status('Job: ' + name, 'warning', 'Last recorded run is more than 5 minutes old'))
+            else:
+                checks.append(status('Job: ' + name, 'current', 'Last run succeeded'))
+    except Exception as exc:
+        checks.append(status('Scheduled job details', 'unknown',
+                             'Could not inspect job history: ' + type(exc).__name__))
     return checks
 
 
@@ -144,6 +166,22 @@ async def run(api, guild):
     core += check_channels(api, guild)
     core += check_roles(api, guild)
     try:
+        last = admin_maintenance.last_report(api)
+        if not last:
+            core.append(status('Startup panel maintenance', 'unknown',
+                               'No automatic startup check has completed yet'))
+        elif last.get('errors') or last.get('remaining'):
+            core.append(status('Startup panel maintenance', 'warning',
+                               str(last.get('updated', 0)) + ' panels updated; '
+                               + str(len(last.get('remaining', []))) + ' unresolved; '
+                               + str(len(last.get('errors', []))) + ' skipped/failed'))
+        else:
+            core.append(status('Startup panel maintenance', 'current',
+                               'Latest startup check completed without detected issues'))
+    except Exception as exc:
+        core.append(status('Startup panel maintenance', 'unknown',
+                           'Cannot read maintenance record: ' + type(exc).__name__))
+    try:
         panels = await panel_health.snapshot(api, guild)
     except Exception as exc:
         panels = [status('Permanent panels', 'unknown',
@@ -183,9 +221,11 @@ def render(report):
                     value='\n'.join(panel_lines)[:1024] or 'No panels could be inspected',
                     inline=False)
 
-    runtime_names = {'Discord connection', 'Gateway latency', 'Scheduled jobs', 'Database'}
+    runtime_names = {'Discord connection', 'Gateway latency', 'Scheduled jobs', 'Database', 'Startup panel maintenance'}
     groups = [('Runtime & database', [c for c in report['core'] if c['name'] in runtime_names]),
-              ('Channel permissions & roles', [c for c in report['core'] if c['name'] not in runtime_names])]
+              ('Scheduled task details', [c for c in report['core'] if c['name'].startswith('Job: ')]),
+              ('Channel permissions & roles', [c for c in report['core']
+                if c['name'] not in runtime_names and not c['name'].startswith('Job: ')])]
     symbols = {'current': '✅', 'problem': '❌', 'warning': '🟠', 'unknown': '❔'}
     for label, checks in groups:
         lines = [f'{symbols.get(c["state"], "❔")} **{c["name"]}:** {c["detail"]}'
@@ -196,5 +236,5 @@ def render(report):
                             value='\n'.join(lines)[:1024] or 'No checks', inline=False)
         else:
             embed.add_field(name=label, value='\n'.join(lines)[:1024], inline=False)
-    embed.set_footer(text='Read-only • Check Again to rerun • Permanent Panels to repair')
+    embed.set_footer(text='Read-only • Checks are point-in-time • Recheck or repair panels from Admin Hub')
     return embed
