@@ -100,6 +100,22 @@ class SchedulerPanelTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(result)
             post.assert_not_awaited()
 
+    def test_message_listing_and_timeline_support_multiple_pages(self):
+        import announcement_ui
+        now=bot.utc_now()
+        for i in range(19):
+            core.create({"channel_id":555,"title":f"Post {i}","body":"Training",
+                "image_url":"","recurrence":"once",
+                "next_run_utc":(now+__import__("datetime").timedelta(days=i+1)).isoformat(),
+                "month_day":1,"ping_guildblast":0},123)
+        self.assertEqual(len(core.upcoming(limit=8,offset=8)),8)
+        self.assertIn("Page 2",announcement_ui.listing(1))
+        self.assertIn("Previous Page",
+            [button.label for button in announcement_ui.UpcomingMenu(4,1).children])
+        self.assertIn("Page 2",panel.timeline_text(page=1))
+        self.assertEqual([b.label for b in panel.TimelineMenu(4).children],
+                         ["Previous Page","Next Page"])
+
     def test_automation_choices_and_preview(self):
         core.save_automation("shop_new",555,"New!","Browse",True,9)
         choices=panel.AutomationChoice(9,create_only=True)
