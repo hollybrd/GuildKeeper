@@ -252,9 +252,9 @@ class TestingCheatsTests(unittest.TestCase):
         self.assertTrue(view.is_persistent())
         self.assertEqual([item.label for item in view.children],
                          ['Add / Remove XP', 'Starter Reset', 'Weekly Reset',
-                          'Add Streak', 'Pause Reset', 'Rank Test Reset',
-                          'Reward Reset', 'All Test Commands'])
-        self.assertEqual([b.row for b in view.children], [0,0,0,1,1,1,2,2])
+                          'Add / Remove Streak', 'Pause Reset', 'Rank Test Reset',
+                          'Reward Reset', 'Milestone Reset', 'All Test Commands'])
+        self.assertEqual([b.row for b in view.children], [0,0,0,1,1,1,2,2,2])
 
     def test_member_actions_require_confirmation(self):
         import testing_cheats
@@ -270,3 +270,26 @@ class TestingCheatsTests(unittest.TestCase):
         self.assertIsNotNone(bot.bot.tree.get_command('admin_starter_reset'))
         self.assertIsNotNone(bot.bot.tree.get_command('admin_weekly_reset'))
 
+
+class CheatImprovementsTests(unittest.TestCase):
+    def test_streak_and_milestone_actions(self):
+        import testing_cheats
+        self.assertEqual([b.label for b in testing_cheats.StreakChoiceView(17).children],
+                         ['Add Streak Weeks', 'Remove Streak Weeks'])
+        self.assertEqual([o.value for o in testing_cheats.MilestoneTargetView(17).children[0].options],
+                         ['order', 'boost', 'both'])
+        self.assertIsNotNone(bot.bot.tree.get_command('admin_milestone_test_reset'))
+
+    def test_command_reference_is_grouped(self):
+        import testing_cheats
+        guide = testing_cheats.test_command_guide()
+        self.assertEqual(len(guide.fields), 4)
+        self.assertIn('/admin_milestone_test_reset', guide.fields[2].value)
+        self.assertIn('/admin_streak_add', guide.fields[1].value)
+        self.assertIn('\\n', guide.fields[0].value)
+
+    def test_only_reward_is_blue_on_player_hub(self):
+        from discord import ButtonStyle
+        view = bot.PlayerStatsView()
+        primary = [b.label for b in view.children if b.style == ButtonStyle.primary]
+        self.assertEqual(primary, ['Claim Reward'])
