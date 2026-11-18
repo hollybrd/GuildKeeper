@@ -154,6 +154,14 @@ def setup_db():
             if col not in columns:
                 db.execute(f'ALTER TABLE reward_tickets ADD COLUMN {col} TEXT')
         db.execute('INSERT OR IGNORE INTO v12_config(key,value) VALUES (?,?)',('activation_week',week_key()))
+        # Backfill the one-time Guild Completion reward for members who
+        # completed all six milestones before this feature was introduced.
+        # Existing milestone claims remain untouched; grant_once is idempotent.
+        historic_members = db.execute(
+            'SELECT DISTINCT guild_id,user_id FROM milestone_claims'
+        ).fetchall()
+        for prior in historic_members:
+            award_guild_completion_if_ready(db, prior['guild_id'], prior['user_id'])
 
 
 def migrate_monday_week_keys():
