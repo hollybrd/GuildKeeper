@@ -1,4 +1,4 @@
-# GYMGUILD Discord Shop — Shopify integration
+# GYMGUILD Discord Shop  -  Shopify integration
 
 ## What is already installed in code
 
