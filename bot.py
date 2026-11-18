@@ -1982,10 +1982,16 @@ async def post_purchase_review(guild: discord.Guild, user_id: int, order_id: int
         colour=discord.Colour.from_rgb(104, 163, 153),
     )
     try:
-        await channel.send(
+        posted = await channel.send(
             embed=embed, view=PurchaseReviewView(order_id),
             allowed_mentions=discord.AllowedMentions.none(),
         )
+        with connect() as db:
+            db.execute(
+                "UPDATE purchase_orders SET review_channel_id=?,review_message_id=? "
+                "WHERE guild_id=? AND id=? AND status='pending'",
+                (channel.id, posted.id, guild.id, order_id),
+            )
     except (discord.Forbidden, discord.HTTPException):
         log.exception('Could not post order XP review request %s', order_id)
         return False
