@@ -2045,6 +2045,36 @@ def milestone_board_embed() -> discord.Embed:
     return embed
 
 
+def boost_milestone_message(gid: int, uid: int, currently_boosting: bool) -> str:
+    """Provide directions without attempting to open Discord's native purchase UI."""
+    with connect() as db:
+        awarded = db.execute(
+            "SELECT 1 FROM milestone_claims WHERE guild_id=? AND user_id=? AND kind='boost1'",
+            (gid, uid),
+        ).fetchone() is not None
+    if awarded:
+        return (
+            f'💎 **Boost milestone complete — {MILESTONE_XP["boost1"]} XP granted!** '
+            'Thank you for supporting GYMGUILD and helping our community grow. ✦'
+        )
+    if currently_boosting:
+        return (
+            '💎 **Thanks for boosting GYMGUILD!** Your boost is active, but the '
+            'milestone reward has not been recorded yet. Please ask a moderator '
+            'to check your reward before boosting again.'
+        )
+    return (
+        '💎 **Boost GYMGUILD**\\n'
+        'Discord does not allow bots to open the native Server Boost checkout window.\\n\\n'
+        '**To boost this server:**\\n'
+        '1. Click **GYMGUILD✦** at the top-left of the channel list.\\n'
+        '2. Select **Server Boost** (or open **Server Boosts** in the sidebar).\\n'
+        '3. Choose **Boost This Server** and follow Discord’s confirmation steps.\\n\\n'
+        f'Once Discord confirms your first boost, GuildKeeper awards **{MILESTONE_XP["boost1"]} XP** automatically. '
+        'Boosting may use an existing Nitro boost or require payment; check Discord’s price before confirming.'
+    )
+
+
 class MilestoneBoardView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -2065,6 +2095,19 @@ class MilestoneBoardView(discord.ui.View):
         if interaction.guild_id != GUILD_ID:
             return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
         await open_order_submission(interaction)
+
+    @discord.ui.button(label='Boost Server', emoji='💎', style=discord.ButtonStyle.secondary,
+                       custom_id='guildkeeper:milestones:boost_server')
+    async def boost_server(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID or not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message(
+                'Only available in GYMGUILD.', ephemeral=True)
+        await interaction.response.send_message(
+            boost_milestone_message(
+                interaction.guild_id, interaction.user.id,
+                interaction.user.premium_since is not None,
+            ), ephemeral=True,
+        )
 
 
 @bot.tree.command(
