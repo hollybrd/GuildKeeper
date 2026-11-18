@@ -59,16 +59,50 @@ class PurchaseMilestoneTests(unittest.TestCase):
                 (self.gid, self.uid),
             ).fetchone()[0], 1)
 
-    def test_one_lifetime_submission_after_rejection(self):
+    def test_rejected_order_can_be_resubmitted_and_approved(self):
         status, first = bot.submit_purchase_order(self.gid, self.uid, 'A001')
         self.assertEqual(status, 'submitted')
         self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, 'A002')[0], 'pending')
         self.assertEqual(bot.review_purchase_order(self.gid, first, 1, False)[0], 'rejected')
-        self.assertEqual(bot.order_submission_status(self.gid, self.uid), 'rejected')
-        self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, 'A002'), ('rejected', first))
-        self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, 'A001'), ('rejected', first))
+        self.assertEqual(bot.order_submission_status(self.gid, self.uid), 'available')
         self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
-        self.assertEqual(bot.purchase_order_summary(self.gid, self.uid)['rejected'], 1)
+        status, second = bot.submit_purchase_order(self.gid, self.uid, 'A002')
+        self.assertEqual(status, 'submitted')
+        self.assertNotEqual(second, first)
+        self.assertEqual(bot.review_purchase_order(self.gid, first, 1, True)[0], 'not_pending')
+        self.assertEqual(bot.review_purchase_order(self.gid, second, 1, True)[0], 'awarded')
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 250)
+        self.assertEqual(bot.order_submission_status(self.gid, self.uid), 'approved')
+        self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, 'A003')[0], 'approved')
+
+    def test_cancel_pending_then_resubmit_without_claiming_xp(self):
+        status, first = bot.submit_purchase_order(self.gid, self.uid, 'A001')
+        self.assertEqual(status, 'submitted')
+        self.assertEqual(bot.order_submission_status(self.gid, self.uid), 'pending')
+        self.assertFalse(bot.OrderXPView(self.uid, self.gid).cancel_request.disabled)
+        result, oid, channel_id, message_id = bot.cancel_purchase_order(self.gid, self.uid)
+        self.assertEqual((result, oid), ('cancelled', first))
+        self.assertIsNone(channel_id)
+        self.assertIsNone(message_id)
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
+        self.assertEqual(bot.review_purchase_order(self.gid, first, 1, True)[0], 'not_pending')
+        self.assertEqual(bot.order_submission_status(self.gid, self.uid), 'available')
+        self.assertTrue(bot.OrderXPView(self.uid, self.gid).cancel_request.disabled)
+        status, second = bot.submit_purchase_order(self.gid, self.uid, 'A002')
+        self.assertEqual(status, 'submitted')
+        self.assertNotEqual(second, first)
+        self.assertEqual(bot.review_purchase_order(self.gid, second, 1, True)[0], 'awarded')
+        self.assertEqual(bot.cancel_purchase_order(self.gid, self.uid)[0], 'approved')
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 250)
+        self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, 'A003')[0], 'approved')
+
+    def test_cancelled_request_can_retry_same_order_reference(self):
+        _, first = bot.submit_purchase_order(self.gid, self.uid, 'A001')
+        self.assertEqual(bot.cancel_purchase_order(self.gid, self.uid)[0], 'cancelled')
+        status, again = bot.submit_purchase_order(self.gid, self.uid, 'A001')
+        self.assertEqual((status, again), ('submitted', first))
+        self.assertEqual(bot.review_purchase_order(self.gid, first, 1, True)[0], 'awarded')
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 250)
 
     def test_orders_scoped_and_order_reuse_blocked(self):
         status, first = bot.submit_purchase_order(self.gid, self.uid, 'XYZ')
@@ -118,7 +152,7 @@ class PurchaseMilestoneTests(unittest.TestCase):
 
     def test_milestone_panel_and_reward_summary_do_not_give_unearned_xp(self):
         self.assertIn('Completed: 0/6', bot.milestone_quests_embed(self.gid, self.uid).description)
-        self.assertIn('single lifetime Order XP request', bot.order_xp_embed(self.gid, self.uid).description)
+        self.assertIn('first approved order', bot.order_xp_embed(self.gid, self.uid).description)
         self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
         bot.submit_purchase_order(self.gid, self.uid, 'xyz')
         self.assertTrue(any('awaiting approval' in field.value for field in bot.order_xp_embed(self.gid, self.uid).fields))
@@ -126,7 +160,7 @@ class PurchaseMilestoneTests(unittest.TestCase):
 
     def test_refresh_controls_across_member_progress_panels(self):
         milestone_buttons = {button.label for button in bot.MilestoneQuestsView(self.uid).children}
-        self.assertEqual(milestone_buttons, {'Refresh Progress', 'Cancel'})
+        self.assertEqual(milestone_buttons, {'Refresh Progress'})
         self.assertNotIn('Submit Order', milestone_buttons)
         self.assertIn('Submit Order XP', {button.label for button in bot.MilestoneBoardView().children})
         for kind in ('starter', 'weekly', 'profile', 'ranks', 'streak'):
@@ -154,11 +188,11 @@ class PurchaseMilestoneTests(unittest.TestCase):
         self.assertTrue(any('250 XP' in field.name for field in progress.fields))
         self.assertEqual(
             {item.label for item in bot.OrderXPView(self.uid).children},
-            {'Submit Order', 'Refresh Status', 'Cancel'},
+            {'Refresh Status', 'Cancel Request'},
         )
         self.assertEqual(
             {item.label for item in bot.MilestoneQuestsView(self.uid).children},
-            {'Refresh Progress', 'Cancel'},
+            {'Refresh Progress'},
         )
 
     def test_invalid_reference_preserves_data(self):
