@@ -2878,13 +2878,41 @@ async def create_reward_ticket(interaction: discord.Interaction, rank: str):
 
 
 
+def reward_button_state(gid: int, uid: int) -> dict[str, str]:
+    """Return locked / available / requested for each permanent reward."""
+    rank_for(get_xp(gid, uid), gid, uid)
+    with connect() as db:
+        unlocked = {row['rank'] for row in db.execute(
+            'SELECT rank FROM rank_unlocks WHERE guild_id=? AND user_id=?', (gid, uid))}
+        requested = {row['rank'] for row in db.execute(
+            'SELECT rank FROM reward_tickets WHERE guild_id=? AND user_id=?', (gid, uid))}
+    return {rank: ('requested' if rank in requested else
+                   'available' if rank in unlocked else 'locked')
+            for rank in REWARD_RANKS}
+
+
 class RewardChoiceView(discord.ui.View):
     def __init__(self, user_id: int):
         super().__init__(timeout=180)
         self.user_id = user_id
+        self.refresh_buttons()
+
+    def refresh_buttons(self):
+        states = reward_button_state(GUILD_ID, self.user_id)
+        for item in self.children:
+            for rank in REWARD_RANKS:
+                if item.label and item.label.startswith(rank + ' ·'):
+                    state = states[rank]
+                    item.disabled = state != 'available'
+                    item.label = f'{rank} · {REWARD_RANKS[rank]}%'
+                    if state == 'requested':
+                        item.label += ' ✓ Claimed'
+                    elif state == 'locked':
+                        item.label += ' 🔒'
+                    break
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.user_id:
+        if interaction.guild_id != GUILD_ID or interaction.user.id != self.user_id:
             await interaction.response.send_message('This reward menu belongs to another member.', ephemeral=True)
             return False
         return True
@@ -2907,7 +2935,7 @@ class RewardChoiceView(discord.ui.View):
             return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
         await interaction.response.edit_message(
             content=guild_rewards_progress_text(interaction.guild_id, interaction.user.id),
-            view=self,
+            view=RewardChoiceView(self.user_id),
         )
 
 
@@ -3469,6 +3497,12 @@ class BotDMToggleView(discord.ui.View):
     def __init__(self, uid):
         super().__init__(timeout=180)
         self.uid = uid
+        enabled = bot_dms_enabled(GUILD_ID, uid)
+        for item in self.children:
+            if item.label == 'Enable Bot DMs':
+                item.disabled = enabled
+            elif item.label == 'Disable Bot DMs':
+                item.disabled = not enabled
 
     async def interaction_check(self, interaction):
         if interaction.guild_id != GUILD_ID or interaction.user.id != self.uid:
@@ -3688,12 +3722,18 @@ class PlayerStatsView(discord.ui.View):
             f'🔔 **Guild Blast** — Currently **{"enabled" if enabled else "disabled"}**.\n'
             'Guild Blast is an optional role used for announcements by admins and Guildkeeper. '
             'Choose below to change your preference.',
-            view=GuildBlastToggleView(interaction.user.id), ephemeral=True)
+            view=GuildBlastToggleView(interaction.user.id, enabled), ephemeral=True)
 
 class GuildBlastToggleView(discord.ui.View):
-    def __init__(self, user_id: int):
+    def __init__(self, user_id: int, currently_enabled: bool | None = None):
         super().__init__(timeout=180)
         self.user_id = user_id
+        if currently_enabled is not None:
+            for item in self.children:
+                if item.label == 'Enable Guild Blast':
+                    item.disabled = currently_enabled
+                elif item.label == 'Disable Guild Blast':
+                    item.disabled = not currently_enabled
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
@@ -3767,11 +3807,38 @@ def pause_panel_text(gid: int, uid: int) -> str:
     )
 
 
+def pause_button_state(gid: int, uid: int) -> tuple[bool, bool]:
+    """Return (can_activate, can_resume) for the current week."""
+    wk = week_key()
+    cutoff = (week_start() - timedelta(weeks=13)).date().isoformat()
+    with connect() as db:
+        used = db.execute(
+            'SELECT COUNT(*) AS n FROM pauses WHERE guild_id=? AND user_id=? '
+            'AND week_key>? AND week_key<=?', (gid, uid, cutoff, wk)
+        ).fetchone()['n']
+        spent = db.execute(
+            'SELECT 1 FROM pauses WHERE guild_id=? AND user_id=? AND week_key=?',
+            (gid, uid, wk)).fetchone() is not None
+        resumed = db.execute(
+            'SELECT 1 FROM resumed_pauses WHERE guild_id=? AND user_id=? AND week_key=?',
+            (gid, uid, wk)).fetchone() is not None
+    return (not spent and used < 2, spent and not resumed)
+
+
 class PausePanelView(discord.ui.View):
     """Private, short-lived pause controls. The persistent hub remains unchanged."""
     def __init__(self, user_id: int):
         super().__init__(timeout=300)
         self.user_id = user_id
+        self.refresh_buttons()
+
+    def refresh_buttons(self):
+        can_activate, can_resume = pause_button_state(GUILD_ID, self.user_id)
+        for item in self.children:
+            if item.label == 'Activate Pause':
+                item.disabled = not can_activate
+            elif item.label == 'Resume XP':
+                item.disabled = not can_resume
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.guild_id != GUILD_ID or interaction.user.id != self.user_id:
@@ -3825,6 +3892,7 @@ class PausePanelView(discord.ui.View):
 
     @discord.ui.button(label='Refresh', emoji='🔄', style=discord.ButtonStyle.secondary)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.refresh_buttons()
         await interaction.response.edit_message(
             content=pause_panel_text(interaction.guild_id, interaction.user.id),
             view=self)
