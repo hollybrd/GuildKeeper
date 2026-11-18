@@ -283,6 +283,50 @@ class PurchaseMilestoneTests(unittest.TestCase):
         self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, 'test-1002')[0], 'approved')
         self.assertEqual(bot.get_xp(self.gid, self.uid), 250)
 
+    def test_admin_credited_streak_weeks_unlock_milestone_rewards(self):
+        from datetime import timedelta
+        start = bot.week_start()
+        with bot.connect() as db:
+            for i in range(12):
+                wk = (start - timedelta(weeks=i)).date().isoformat()
+                db.execute('INSERT INTO admin_streak_weeks VALUES (?,?,?,?)',
+                           (self.gid, self.uid, wk, bot.utc_now().isoformat()))
+        new = bot.award_earned_streak_milestones(self.gid, self.uid)
+        self.assertEqual(new, ['streak4', 'streak8', 'streak12'])
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 75 + 125 + 175)
+        self.assertEqual(bot.award_earned_streak_milestones(self.gid, self.uid), [])
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 375)
+        self.assertEqual(bot.milestone_progress(self.gid, self.uid)['completed'], 3)
+
+    def test_previous_admin_streak_credits_are_backfilled_and_stay_earned(self):
+        from datetime import timedelta
+        start = bot.week_start() - timedelta(weeks=13)
+        with bot.connect() as db:
+            for i in range(8):
+                wk = (start - timedelta(weeks=i)).date().isoformat()
+                db.execute('INSERT INTO admin_streak_weeks VALUES (?,?,?,?)',
+                           (self.gid, self.uid, wk, bot.utc_now().isoformat()))
+        self.assertEqual(bot.active_streak(self.gid, self.uid), 0)
+        self.assertEqual(bot.backfill_earned_streak_milestones(self.gid), 2)
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 200)
+        self.assertEqual(bot.backfill_earned_streak_milestones(self.gid), 0)
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 200)
+
+    def test_pauses_preserve_but_do_not_add_streak_milestone_weeks(self):
+        from datetime import timedelta
+        start = bot.week_start()
+        with bot.connect() as db:
+            for i in (0, 1, 3, 4):
+                wk = (start - timedelta(weeks=i)).date().isoformat()
+                db.execute('INSERT INTO admin_streak_weeks VALUES (?,?,?,?)',
+                           (self.gid, self.uid, wk, bot.utc_now().isoformat()))
+            paused = (start - timedelta(weeks=2)).date().isoformat()
+            db.execute('INSERT INTO pauses VALUES (?,?,?,?)',
+                       (self.gid, self.uid, paused, bot.utc_now().isoformat()))
+        self.assertEqual(bot.longest_streak(self.gid, self.uid), 4)
+        self.assertEqual(bot.award_earned_streak_milestones(self.gid, self.uid), ['streak4'])
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 75)
+
     def test_admin_reset_order_reverses_xp_preserves_audit_and_can_retest_same_reference(self):
         other = self.uid + 1
         status, order_id = bot.submit_purchase_order(self.gid, self.uid, '#9001')
