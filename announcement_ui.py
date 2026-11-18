@@ -47,12 +47,13 @@ def summary(row):
 
 
 # Build the upcoming announcements summary from saved database entries.
-def listing():
-    rows = core.upcoming()
+def listing(page=0):
+    page=max(0,page)
+    rows = core.upcoming(limit=8,offset=page*8)
     if not rows:
         return "📆 **Scheduled Announcements**\nNo scheduled announcements yet."
     active = next((r for r in rows if r["status"] == "active"), None)
-    lines = ["📆 **Scheduled Announcements**",
+    lines = [f"📆 **Scheduled Announcements | Page {page+1}**",
              "**Next post:** "+when_label(active) + f'  -  {active["title"]}' if active else
              "**Next post:** None scheduled", ""]
     for row in rows:
@@ -201,8 +202,8 @@ class ConfirmSchedule(Private):
 
 
 class AnnouncementSelect(discord.ui.Select):
-    def __init__(self):
-        rows=core.upcoming()
+    def __init__(self,page=0):
+        rows=core.upcoming(limit=8,offset=page*8)
         super().__init__(placeholder="Select an announcement to manage",
                          options=[discord.SelectOption(
                              label=f'#{r["id"]} {r["title"][:70]}',
@@ -224,18 +225,37 @@ class AnnouncementSelect(discord.ui.Select):
 
 # Select saved jobs for editing or cancellation.
 class UpcomingMenu(Private):
-    def __init__(self,owner):
+    def __init__(self,owner,page=0):
         super().__init__(owner)
-        if core.upcoming():
-            self.add_item(AnnouncementSelect())
+        self.page=max(0,page)
+        if core.upcoming(limit=8,offset=self.page*8):
+            self.add_item(AnnouncementSelect(self.page))
 
     @discord.ui.button(label="Refresh List",emoji="🔄",style=discord.ButtonStyle.secondary,row=1)
     async def refresh(self,interaction,button):
-        await interaction.response.edit_message(content=listing(),view=UpcomingMenu(self.owner),
+        await interaction.response.edit_message(content=listing(self.page),view=UpcomingMenu(self.owner,self.page),
                                                 allowed_mentions=discord.AllowedMentions.none())
 
 
 # Actions on one saved schedule: preview, edit, cancel or delete.
+    @discord.ui.button(label="Previous Page",emoji="⬅️",style=discord.ButtonStyle.secondary,row=1)
+    async def previous(self,interaction,button):
+        page=max(0,self.page-1)
+        await interaction.response.edit_message(
+            content=listing(page),view=UpcomingMenu(self.owner,page),
+            allowed_mentions=discord.AllowedMentions.none())
+
+    @discord.ui.button(label="Next Page",emoji="➡️",style=discord.ButtonStyle.secondary,row=1)
+    async def next(self,interaction,button):
+        page=self.page+1
+        if not core.upcoming(limit=8,offset=page*8):
+            return await interaction.response.send_message(
+                "You are already on the final page.",ephemeral=True)
+        await interaction.response.edit_message(
+            content=listing(page),view=UpcomingMenu(self.owner,page),
+            allowed_mentions=discord.AllowedMentions.none())
+
+
 class JobMenu(Private):
     def __init__(self,owner,job_id):
         super().__init__(owner)
