@@ -75,6 +75,16 @@ class PurchaseMilestoneTests(unittest.TestCase):
         self.assertEqual((status, again), ('submitted', first))
         self.assertEqual(bot.review_purchase_order(self.gid, first, 1, True)[0], 'awarded')
 
+    def test_rejected_order_cannot_reopen_when_another_order_is_pending(self):
+        _, old = bot.submit_purchase_order(self.gid, self.uid, 'previous-rejected')
+        self.assertEqual(bot.review_purchase_order(self.gid, old, 11, False)[0], 'rejected')
+        _, current = bot.submit_purchase_order(self.gid, self.uid, 'new-pending')
+        self.assertEqual(bot.submit_purchase_order(
+            self.gid, self.uid, 'previous-rejected'), ('pending', current))
+        summary = bot.purchase_order_summary(self.gid, self.uid)
+        self.assertEqual(summary['pending'], 1)
+        self.assertEqual(summary['rejected'], 1)
+
     def test_orders_scoped_and_order_reuse_blocked(self):
         status, first = bot.submit_purchase_order(self.gid, self.uid, 'XYZ')
         self.assertEqual(status, 'submitted')
