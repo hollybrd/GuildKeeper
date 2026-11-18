@@ -3655,7 +3655,7 @@ class PlayerStatsView(discord.ui.View):
 
 
     @discord.ui.button(label='All Quests', emoji='📜', style=discord.ButtonStyle.secondary,
-                       custom_id='guildkeeper:stats:all_quests', row=3)
+                       custom_id='guildkeeper:stats:all_quests', row=2)
     async def all_quests_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.guild_id != GUILD_ID:
             return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
