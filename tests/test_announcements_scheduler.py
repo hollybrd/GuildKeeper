@@ -1,4 +1,12 @@
-"""Regression tests for the durable GuildKeeper announcement scheduler."""
+"""Regression tests for the durable GuildKeeper announcement scheduler.
+
+READING GUIDE
+-------------
+Freezes UK dates and simulates Discord sends so we can verify recurrence, daylight-saving changes, idempotent delivery and weekly/monthly notices without posting anything real.
+
+Each setUp() uses a temporary SQLite database rather than GuildKeeper's
+real player database. Assertions compare actual results with expected rules.
+"""
 import tempfile
 import unittest
 from datetime import datetime, timezone
