@@ -765,13 +765,16 @@ async def admin_streak_add(interaction: discord.Interaction, member: discord.Mem
             result = db.execute('INSERT OR IGNORE INTO admin_streak_weeks VALUES (?,?,?,?)',
                                 (interaction.guild_id,member.id,key,utc_now().isoformat()))
             added += result.rowcount
+    milestones = award_earned_streak_milestones(interaction.guild_id, member.id)
     await update_rank(member, get_xp(interaction.guild_id, member.id))
     await interaction.followup.send(
         f'🔥 Credited **{added}** additional streak week(s) to {member.mention} '
         f'(requested {weeks} consecutive weeks, ending this week). '
         f'Active streak: **{active_streak(interaction.guild_id,member.id)}** weeks. '
         f'Rank: **{rank_for(get_xp(interaction.guild_id,member.id),interaction.guild_id,member.id)}**. '
-        'No XP or quest objectives were awarded.', ephemeral=True)
+        + (f'Unlocked **{len(milestones)}** streak milestone(s) with their one-time XP rewards.'
+           if milestones else 'No new streak milestone rewards were due.'),
+        ephemeral=True)
 
 def reset_rank_test_data(gid: int, uid: int) -> int:
     """Reset the member's rank testing progress to permanent Novice.
@@ -1152,6 +1155,46 @@ def longest_streak(gid: int, uid: int) -> int:
             current = 0
         cursor += timedelta(days=7)
     return best
+
+
+STREAK_MILESTONE_THRESHOLDS = (
+    (4, 'streak4'),
+    (8, 'streak8'),
+    (12, 'streak12'),
+)
+
+
+def award_earned_streak_milestones(gid: int, uid: int) -> list[str]:
+    """Recognize consecutive credited or completed weeks, exactly once.
+
+    Admin-added streak weeks count as completions, just like the rank streak
+    display. Historical consecutive records count even after a streak breaks.
+    Pauses protect a run without increasing its length.
+    """
+    longest = longest_streak(gid, uid)
+    awarded = []
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        for needed, kind in STREAK_MILESTONE_THRESHOLDS:
+            if longest >= needed and grant_once(
+                db, 'milestone_claims', gid, uid, kind, MILESTONE_XP[kind]
+            ):
+                awarded.append(kind)
+    return awarded
+
+
+def backfill_earned_streak_milestones(gid: int) -> int:
+    """Repair earlier admin streak credits without touching member records."""
+    with connect() as db:
+        members = db.execute(
+            'SELECT user_id FROM ('
+            'SELECT user_id FROM admin_streak_weeks WHERE guild_id=? '
+            'UNION SELECT user_id FROM weekly_completions WHERE guild_id=?'
+            ') ORDER BY user_id',
+            (gid, gid),
+        ).fetchall()
+    return sum(len(award_earned_streak_milestones(gid, row['user_id']))
+               for row in members)
 
 
 def reward_eligibility_text(gid: int, uid: int) -> str:
@@ -3441,6 +3484,8 @@ async def on_ready():
         return
     startup_synced = True
     try:
+        awarded = backfill_earned_streak_milestones(GUILD_ID)
+        log.info('Startup backfilled %s missed streak milestones', awarded)
         success, failed = await sync_all_ranks(guild)
         log.info('Startup rank sync complete: %s successful, %s failed', success, failed)
         await settle_previous_weeks()
