@@ -10,6 +10,7 @@ import sys
 
 import admin_hub
 import testing_cheats
+import admin_maintenance
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -4044,12 +4045,28 @@ async def admin_leaderboard_update(interaction: discord.Interaction):
 
 @tasks.loop(minutes=1)
 async def scheduler():
-    await settle_previous_weeks()
-    create_streak_warnings()
-    await deliver_notifications()
-    await post_weekly_board()
-    await update_permanent_leaderboard()
-    await expire_reward_tickets()
+    """Run independent jobs even if one fails; surface errors in Admin Health."""
+    for name, operation in (
+        ('weekly_settlement', settle_previous_weeks),
+        ('streak_warnings', create_streak_warnings),
+        ('notifications', deliver_notifications),
+        ('weekly_board', post_weekly_board),
+        ('leaderboard', update_permanent_leaderboard),
+        ('reward_ticket_expiry', expire_reward_tickets),
+    ):
+        try:
+            result = operation()
+            if asyncio.iscoroutine(result):
+                await result
+            admin_maintenance.record_job(api=sys.modules[__name__],
+                                         name=name, success=True)
+        except Exception as error:
+            log.exception('Scheduled task %s failed', name)
+            try:
+                admin_maintenance.record_job(api=sys.modules[__name__],
+                                             name=name, success=False, error=type(error).__name__)
+            except Exception:
+                log.exception('Could not persist failure of scheduled task %s', name)
 
 @scheduler.before_loop
 async def before_scheduler():
@@ -4076,6 +4093,13 @@ async def on_ready():
         await settle_previous_weeks()
     except (discord.HTTPException, discord.Forbidden):
         log.exception('Startup rank sync failed; verify Server Members Intent and permissions')
+
+    # Panel maintenance does not block or affect the existing scheduled jobs.
+    try:
+        report = await admin_maintenance.reconcile(sys.modules[__name__], guild)
+        log.info('Permanent panel health after startup: %s', report)
+    except Exception:
+        log.exception('Automatic panel maintenance failed; use Admin Hub Health Check')
 
 
 @bot.tree.error
