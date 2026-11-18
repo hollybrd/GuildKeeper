@@ -128,6 +128,15 @@ def setup_db():
           PRIMARY KEY(guild_id,user_id));
         CREATE TABLE IF NOT EXISTS schedule_posts (guild_id INTEGER NOT NULL, post_key TEXT NOT NULL,
           PRIMARY KEY(guild_id,post_key));
+        CREATE TABLE IF NOT EXISTS bot_dm_preferences (
+          guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+          PRIMARY KEY(guild_id,user_id));
+        CREATE TABLE IF NOT EXISTS bot_dm_reminders (
+          guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+          week_key TEXT NOT NULL, reminder_kind TEXT NOT NULL,
+          attempted_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'attempted',
+          PRIMARY KEY(guild_id,user_id,week_key,reminder_kind));
         ''')
         # Carry forward any historical first-purchase requests without touching
         # milestone claims, XP balances or existing moderator decisions.
@@ -205,6 +214,38 @@ def completed_weeks(guild_id, user_id):
 
 
 STREAK_REQUIREMENTS = {'Master': 2, 'Legend': 4, 'Paragon': 8}
+
+def bot_dm_enabled(gid: int, uid: int) -> bool:
+    """Reminders are enabled by default until explicitly disabled by a member."""
+    with connect() as db:
+        row = db.execute(
+            'SELECT enabled FROM bot_dm_preferences WHERE guild_id=? AND user_id=?',
+            (gid, uid),
+        ).fetchone()
+    return bool(row['enabled']) if row else True
+
+
+def set_bot_dm_enabled(gid: int, uid: int, enabled: bool) -> None:
+    with connect() as db:
+        db.execute(
+            'INSERT INTO bot_dm_preferences(guild_id,user_id,enabled) VALUES (?,?,?) '
+            'ON CONFLICT(guild_id,user_id) DO UPDATE SET enabled=excluded.enabled',
+            (gid, uid, int(enabled)),
+        )
+
+
+def bot_dm_preference_text(enabled: bool) -> str:
+    if enabled:
+        return (
+            '🔔 **Bot DMs are ON.** GuildKeeper can privately remind you before '
+            'your weekly streak is at risk or you could lose inactivity XP.\\n\\n'
+            'To switch them off, open the **Player Hub → Bot DMs → Turn Off**.'
+        )
+    return (
+        '🔕 **Bot DMs are OFF.** You won’t receive GuildKeeper streak or inactivity '
+        'warnings. To turn them on, open the **Player Hub → Bot DMs → Turn On**.'
+    )
+
 
 def streak_weeks(gid, uid):
     with connect() as db:
