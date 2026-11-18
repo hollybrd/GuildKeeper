@@ -130,7 +130,8 @@ Comments explain the *current implementation*. They do not mean a feature has pa
 ## Other guides
 
 - [Live Discord testing](LIVE_TESTING.md)  -  how to test with a separate ordinary account.
-- [Announcements](ANNOUNCEMENTS.md)  -  automatic and manually scheduled posts.
+- [Announcements](ANNOUNCEMENTS.md)
+- [Permanent Message Scheduler](MESSAGE_SCHEDULER.md) - staff timeline and automation editing.  -  automatic and manually scheduled posts.
 - [Shopify integration](SHOPIFY_DISCORD.md)  -  catalog, order checks, reward codes, and secrets.
 
 If you want to understand a particular button, search GitHub for its label or `custom_id`, follow its callback, and look for the helper it calls in `bot.py`.
