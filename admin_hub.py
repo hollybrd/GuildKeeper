@@ -289,6 +289,16 @@ class RewardMenu(PrivateMenu):
 
 # Entrypoint for scheduled announcements and immediate, one-off posts.
 class AnnouncementMenu(PrivateMenu):
+    @discord.ui.button(label='Open Scheduler Dashboard', emoji='📨',
+                       style=discord.ButtonStyle.primary, row=1)
+    async def scheduler_dashboard(self, interaction, button):
+        await interaction.response.send_message(
+            '📨 **Permanent Message Scheduler**\n'
+            'Use /admin_scheduler_post in a private staff channel to create or move '
+            'the permanent dashboard. It includes a timeline, automation status, '
+            'new message and automation controls.',
+            ephemeral=True)
+
     @discord.ui.button(label='Schedule Message', emoji='📅', style=discord.ButtonStyle.primary)
     async def schedule(self, interaction, button):
         await interaction.response.send_message(
