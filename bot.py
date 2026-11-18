@@ -1074,6 +1074,13 @@ def reset_milestone_test_data(gid: int, uid: int, target: str) -> dict:
             else:
                 result['completion'] = 1
         if 'purchase1' in kinds:
+            # Prevent legacy migration on the next startup from resurrecting
+            # imported pending requests under their original order reference.
+            db.execute(
+                "UPDATE pending_milestones SET status='test_reset' "
+                "WHERE guild_id=? AND user_id=? AND kind='purchase1'",
+                (gid, uid),
+            )
             # Do not destroy verification or moderator history. Archiving
             # every prior row prevents a stale approval button from granting XP.
             result['orders_archived'] = db.execute(
