@@ -1840,42 +1840,51 @@ def order_xp_embed(gid: int, uid: int) -> discord.Embed:
     return embed
 
 
+def order_submission_status(gid: int, uid: int) -> str:
+    """Exactly one lifetime purchase request; historic records stay intact."""
+    with connect() as db:
+        claimed = db.execute(
+            "SELECT 1 FROM milestone_claims WHERE guild_id=? AND user_id=? AND kind='purchase1'",
+            (gid, uid),
+        ).fetchone()
+        if claimed:
+            return 'approved'
+        row = db.execute(
+            'SELECT status FROM purchase_orders WHERE guild_id=? AND user_id=? '
+            'ORDER BY id LIMIT 1', (gid, uid),
+        ).fetchone()
+    return row['status'] if row else 'available'
+
+
 def submit_purchase_order(gid: int, uid: int, reference: str) -> tuple[str, int | None]:
+    """Save at most one lifetime order request per member, including rejected ones.
+
+    Do not delete, replace or reopen historical submissions, even when another
+    record exists from before this restriction was introduced.
+    """
     reference = reference.strip()
-    if not reference or len(reference) > 80 or any(ord(char) < 32 for char in reference):
-        return 'invalid', None
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
+        claim = db.execute(
+            "SELECT 1 FROM milestone_claims WHERE guild_id=? AND user_id=? AND kind='purchase1'",
+            (gid, uid),
+        ).fetchone()
+        if claim:
+            return 'approved', None
+        old = db.execute(
+            'SELECT id,status FROM purchase_orders WHERE guild_id=? AND user_id=? '
+            'ORDER BY id LIMIT 1', (gid, uid),
+        ).fetchone()
+        if old:
+            return old['status'], old['id']
+        if not reference or len(reference) > 80 or any(ord(char) < 32 for char in reference):
+            return 'invalid', None
         row = db.execute(
-            'SELECT id,user_id,status FROM purchase_orders WHERE guild_id=? AND order_reference=?',
+            'SELECT id FROM purchase_orders WHERE guild_id=? AND order_reference=?',
             (gid, reference),
         ).fetchone()
         if row:
-            if row['user_id'] != uid:
-                return 'duplicate', None
-            if row['status'] != 'rejected':
-                return row['status'], row['id']
-            # A rejected order may be resubmitted only if no other order
-            # is awaiting review for this same member.
-            other_pending = db.execute(
-                "SELECT id FROM purchase_orders WHERE guild_id=? AND user_id=? "
-                "AND status='pending' AND id!=?",
-                (gid, uid, row['id']),
-            ).fetchone()
-            if other_pending:
-                return 'pending', other_pending['id']
-            db.execute(
-                "UPDATE purchase_orders SET status='pending',submitted_at=?,reviewed_at=NULL,reviewed_by=NULL "
-                'WHERE id=?', (utc_now().isoformat(), row['id']),
-            )
-            return 'submitted', row['id']
-        # Prevent multiple simultaneously pending orders for one member.
-        pending = db.execute(
-            "SELECT id FROM purchase_orders WHERE guild_id=? AND user_id=? AND status='pending'",
-            (gid, uid),
-        ).fetchone()
-        if pending:
-            return 'pending', pending['id']
+            return 'duplicate', None
         cur = db.execute(
             "INSERT INTO purchase_orders(guild_id,user_id,order_reference,status,submitted_at) "
             "VALUES (?,?,?,'pending',?)",
@@ -1969,7 +1978,10 @@ async def submit_order_from_interaction(interaction: discord.Interaction, refere
     elif status == 'pending':
         message = '⏳ You already have an order awaiting moderator review.'
     elif status == 'approved':
-        message = '✅ This order has already been approved.'
+        message = '✅ Order XP granted — milestone objective complete.'
+    elif status == 'rejected':
+        message = ('❌ Your one-time Order XP request was rejected. '
+                   'Please contact a moderator if you believe this is incorrect.')
     elif status == 'duplicate':
         message = '❌ That order reference is already registered to another Guild member. Contact a moderator.'
     else:
@@ -2020,7 +2032,7 @@ class MilestoneBoardView(discord.ui.View):
     async def submit_order(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.guild_id != GUILD_ID:
             return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
-        await interaction.response.send_modal(OrderReferenceModal())
+        await open_order_submission(interaction)
 
 
 @bot.tree.command(
@@ -2092,7 +2104,7 @@ class MilestoneQuestsView(discord.ui.View):
 
     @discord.ui.button(label='Submit Order', emoji='🛍️', style=discord.ButtonStyle.primary)
     async def submit_order(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(OrderReferenceModal())
+        await open_order_submission(interaction)
 
     @discord.ui.button(label='Refresh Progress', emoji='🔄', style=discord.ButtonStyle.secondary)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2105,6 +2117,32 @@ class MilestoneQuestsView(discord.ui.View):
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content='Order XP panel closed. No new order submitted.', embed=None, view=None)
         self.stop()
+
+
+async def open_order_submission(interaction: discord.Interaction) -> None:
+    """Show the order modal only before a member makes their lifetime request."""
+    if interaction.guild_id != GUILD_ID or not isinstance(interaction.user, discord.Member):
+        return await interaction.response.send_message(
+            'Only available in GYMGUILD.', ephemeral=True)
+    status = order_submission_status(interaction.guild_id, interaction.user.id)
+    if status == 'approved':
+        return await interaction.response.send_message(
+            '✅ **Order XP granted — milestone objective complete.**',
+            ephemeral=True,
+        )
+    if status == 'pending':
+        return await interaction.response.send_message(
+            '⏳ Your Order XP request is already awaiting moderator approval. '
+            'You can view its status under Milestone Quests or Rewards.',
+            ephemeral=True,
+        )
+    if status == 'rejected':
+        return await interaction.response.send_message(
+            '❌ Your one-time Order XP request was rejected. '
+            'Please contact a moderator if it needs reviewing.',
+            ephemeral=True,
+        )
+    await interaction.response.send_modal(OrderReferenceModal())
 
 
 class OrderReferenceModal(discord.ui.Modal, title='Submit a GYMGUILD order'):
@@ -2130,7 +2168,7 @@ class OrderXPView(discord.ui.View):
 
     @discord.ui.button(label='Submit Order', emoji='🛍️', style=discord.ButtonStyle.primary)
     async def submit_order(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(OrderReferenceModal())
+        await open_order_submission(interaction)
 
     @discord.ui.button(label='Refresh Status', emoji='🔄', style=discord.ButtonStyle.secondary)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
