@@ -1,4 +1,12 @@
-"""Regression tests for onboarding and XP rank progression (no Discord connection)."""
+"""Regression tests for onboarding and XP rank progression (no Discord connection).
+
+READING GUIDE
+-------------
+Checks onboarding gates, permanent rank unlocks, XP thresholds, streak requirements and test resets, all offline rather than connecting to Discord.
+
+Each setUp() uses a temporary SQLite database rather than GuildKeeper's
+real player database. Assertions compare actual results with expected rules.
+"""
 import tempfile
 import unittest
 from pathlib import Path
