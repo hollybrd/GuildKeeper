@@ -94,6 +94,50 @@ class ShopifyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(shopify_client.admin_endpoint(),
                 "https://gymguild.myshopify.com/admin/api/2026-10/graphql.json")
 
+
+    async def test_2026_client_credentials_exchange_and_in_memory_cache(self):
+        class OAuthResponse:
+            status=200
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self,*args):
+                return False
+            async def json(self):
+                return {"access_token":"fresh-test-token","expires_in":86399}
+
+        class OAuthSession:
+            def __init__(self):
+                self.requests=[]
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self,*args):
+                return False
+            def post(self,url,**kwargs):
+                self.requests.append((url,kwargs))
+                return OAuthResponse()
+
+        session=OAuthSession()
+        previous=(shopify_client._token,shopify_client._token_until)
+        try:
+            shopify_client._token=None
+            shopify_client._token_until=0
+            with patch.dict(os.environ,{
+                "SHOPIFY_ADMIN_DOMAIN":"gymguild.myshopify.com",
+                "SHOPIFY_CLIENT_ID":"test-id",
+                "SHOPIFY_CLIENT_SECRET":"test-secret",
+                "SHOPIFY_ADMIN_TOKEN":"",
+            }),patch.object(shopify_client.aiohttp,"ClientSession",return_value=session):
+                self.assertTrue(shopify_client.admin_configured())
+                self.assertEqual(await shopify_client.admin_token(),"fresh-test-token")
+                self.assertEqual(await shopify_client.admin_token(),"fresh-test-token")
+            self.assertEqual(len(session.requests),1)
+            self.assertEqual(session.requests[0][0],
+                "https://gymguild.myshopify.com/admin/oauth/access_token")
+            self.assertEqual(session.requests[0][1]["data"]["grant_type"],
+                             "client_credentials")
+        finally:
+            shopify_client._token,shopify_client._token_until=previous
+
     async def test_order_validation_never_trusts_order_number_alone(self):
         order={"id":"gid://shopify/Order/987","name":"#1234","email":"buyer@example.com",
                "displayFinancialStatus":"PAID","cancelledAt":None,
