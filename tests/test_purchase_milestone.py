@@ -45,45 +45,30 @@ class PurchaseMilestoneTests(unittest.TestCase):
                 (self.gid, self.uid),
             ).fetchone()[0], 1)
 
-    def test_future_orders_tracked_but_first_purchase_reward_once(self):
+    def test_one_lifetime_submission_after_approval(self):
         status, first = bot.submit_purchase_order(self.gid, self.uid, '#1001')
-        self.assertEqual(bot.review_purchase_order(self.gid, first, 1, True)[0], 'awarded')
-        status, second = bot.submit_purchase_order(self.gid, self.uid, '#1002')
         self.assertEqual(status, 'submitted')
-        self.assertEqual(bot.review_purchase_order(self.gid, second, 1, True)[0], 'approved_no_xp')
+        self.assertEqual(bot.review_purchase_order(self.gid, first, 1, True)[0], 'awarded')
+        self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, '#1002')[0], 'approved')
+        self.assertEqual(bot.order_submission_status(self.gid, self.uid), 'approved')
         self.assertEqual(bot.get_xp(self.gid, self.uid), 250)
-        summary = bot.purchase_order_summary(self.gid, self.uid)
-        self.assertEqual(summary['approved'], 2)
-        self.assertEqual(summary['earned_xp'], 250)
+        self.assertEqual(bot.purchase_order_summary(self.gid, self.uid)['approved'], 1)
         with bot.connect() as db:
             self.assertEqual(db.execute(
-                "SELECT COUNT(*) FROM milestone_claims WHERE guild_id=? AND user_id=? AND kind='purchase1'",
+                'SELECT COUNT(*) FROM purchase_orders WHERE guild_id=? AND user_id=?',
                 (self.gid, self.uid),
             ).fetchone()[0], 1)
 
-    def test_pending_status_and_rejection_resubmission(self):
-        self.assertEqual(bot.purchase_order_summary(self.gid, self.uid)['approved'], 0)
+    def test_one_lifetime_submission_after_rejection(self):
         status, first = bot.submit_purchase_order(self.gid, self.uid, 'A001')
         self.assertEqual(status, 'submitted')
         self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, 'A002')[0], 'pending')
-        summary = bot.purchase_order_summary(self.gid, self.uid)
-        self.assertEqual(summary['pending'], 1)
-        self.assertEqual(summary['potential_xp'], 250)
         self.assertEqual(bot.review_purchase_order(self.gid, first, 1, False)[0], 'rejected')
+        self.assertEqual(bot.order_submission_status(self.gid, self.uid), 'rejected')
+        self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, 'A002'), ('rejected', first))
+        self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, 'A001'), ('rejected', first))
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
         self.assertEqual(bot.purchase_order_summary(self.gid, self.uid)['rejected'], 1)
-        status, again = bot.submit_purchase_order(self.gid, self.uid, 'A001')
-        self.assertEqual((status, again), ('submitted', first))
-        self.assertEqual(bot.review_purchase_order(self.gid, first, 1, True)[0], 'awarded')
-
-    def test_rejected_order_cannot_reopen_when_another_order_is_pending(self):
-        _, old = bot.submit_purchase_order(self.gid, self.uid, 'previous-rejected')
-        self.assertEqual(bot.review_purchase_order(self.gid, old, 11, False)[0], 'rejected')
-        _, current = bot.submit_purchase_order(self.gid, self.uid, 'new-pending')
-        self.assertEqual(bot.submit_purchase_order(
-            self.gid, self.uid, 'previous-rejected'), ('pending', current))
-        summary = bot.purchase_order_summary(self.gid, self.uid)
-        self.assertEqual(summary['pending'], 1)
-        self.assertEqual(summary['rejected'], 1)
 
     def test_orders_scoped_and_order_reuse_blocked(self):
         status, first = bot.submit_purchase_order(self.gid, self.uid, 'XYZ')
@@ -111,7 +96,7 @@ class PurchaseMilestoneTests(unittest.TestCase):
                 db, 'milestone_claims', self.gid, self.uid, kinds[-1], 50))
         self.assertTrue(bot.milestone_progress(self.gid, self.uid)['bonus_earned'])
         self.assertEqual(bot.milestone_progress(self.gid, self.uid)['completed'], 6)
-        self.assertEqual(bot.get_xp(self.gid, self.uid), 755)
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 555)
         with bot.connect() as db:
             self.assertEqual(db.execute(
                 "SELECT COUNT(*) FROM milestone_claims WHERE guild_id=? AND user_id=? AND kind='guild_completion'",
@@ -187,13 +172,12 @@ class PurchaseMilestoneTests(unittest.TestCase):
         self.assertIn('Milestone Quests', {button.label for button in hub.children})
         self.assertLessEqual(len(hub.children), 25)
 
-    def test_review_resubmission_retains_once_only_claim_after_restart(self):
+    def test_one_lifetime_submission_persists_after_restart(self):
         _, first = bot.submit_purchase_order(self.gid, self.uid, 'test-1001')
         self.assertEqual(bot.review_purchase_order(self.gid, first, 42, True)[0], 'awarded')
         self.assertEqual(bot.get_xp(self.gid, self.uid), 250)
         bot.setup_db()
-        _, second = bot.submit_purchase_order(self.gid, self.uid, 'test-1002')
-        self.assertEqual(bot.review_purchase_order(self.gid, second, 42, True)[0], 'approved_no_xp')
+        self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, 'test-1002')[0], 'approved')
         self.assertEqual(bot.get_xp(self.gid, self.uid), 250)
 
     def test_legacy_pending_purchase_is_migrated_without_awarding_xp(self):
