@@ -2084,10 +2084,6 @@ class MilestoneQuestsView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label='Submit Order', emoji='🛍️', style=discord.ButtonStyle.primary)
-    async def submit_order(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await open_order_submission(interaction)
-
     @discord.ui.button(label='Refresh Progress', emoji='🔄', style=discord.ButtonStyle.secondary)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
@@ -2791,6 +2787,99 @@ def player_stats_embed():
     embed.add_field(name='🏆 Milestone Quests', value='See your milestones and progress, and submit Shopify orders', inline=False)
     embed.set_footer(text='GYMGUILD ✦ Where culture meets strength')
     return embed
+
+
+def profile_progress_text(gid: int, uid: int, display_name: str) -> str:
+    xp = get_xp(gid, uid)
+    next_rank = next(((name, threshold) for name, threshold in RANKS if threshold > xp), None)
+    upcoming = (f'Next: **{next_rank[0]}** in **{next_rank[1]-xp} XP**'
+                if next_rank else 'Maximum rank reached ✦')
+    notice = streak_blocked_rank_notice(gid, uid, xp)
+    return (
+        f'✦ **{display_name}** — Rank: **{rank_for(xp, gid, uid)}** · XP: **{xp}**\\n'
+        f'🎯 Lifetime objectives completed: **{lifetime_objectives(gid, uid)}**\\n'
+        f'Longest streak: **{longest_streak(gid, uid)} weeks**\\n\\n'
+        f'**Rewards**\\n{reward_eligibility_text(gid, uid)}\\n{upcoming}'
+        + ('\\n\\n' + notice if notice else '')
+    )
+
+
+def streak_progress_text(gid: int, uid: int) -> str:
+    return (
+        f'🔥 **Your Weekly Streak** — Completed weeks: **{completed_weeks(gid, uid)}** '
+        f'· Current closed-week streak: **{streak_length(gid, uid)}**. '
+        'Paused weeks preserve but do not increase your streak.'
+    )
+
+
+def ranks_progress_embed(gid: int, uid: int) -> discord.Embed:
+    embed = discord.Embed(title='✦ GYMGUILD — RANKS', color=0x71A7A2)
+    for name, threshold in RANKS:
+        requirement = (f'{threshold:,} XP + **{STREAK_REQUIREMENTS[name]}-week active streak**'
+                       if name in STREAK_REQUIREMENTS else f'{threshold:,} XP')
+        reward = f' · **{REWARD_RANKS[name]}% reward**' if name in REWARD_RANKS else ''
+        embed.add_field(name=f'✦ {name}', value=requirement + reward, inline=False)
+    embed.add_field(name='🔒 Rank & reward rules', value=(
+        'Streak requirements must be met **while your streak is active**. '
+        'Paused weeks protect a streak but do not add to it.\\n\\n'
+        'Unlocked ranks survive broken streaks. Only losing XP below a rank threshold can demote you; '
+        'earning the XP back restores that rank without repeating the streak.\\n\\n'
+        '**Each rank reward unlocks permanently and can be claimed once**, '
+        'even if you later drop to a lower rank.'), inline=False)
+    notice = streak_blocked_rank_notice(gid, uid, get_xp(gid, uid))
+    if notice:
+        embed.add_field(name='🔒 Your rank progress', value=notice, inline=False)
+    embed.set_footer(text='GYMGUILD ✦ Where culture meets strength')
+    return embed
+
+
+def guild_rewards_progress_text(gid: int, uid: int) -> str:
+    return (
+        '🎟️ **Guild Rewards**\\n\\n' + reward_eligibility_text(gid, uid)
+        + '\\n\\nSelect an **eligible, unclaimed** rank reward below to open '
+          'a private ticket with Guild admins. Rank rewards are one-time Shopify '
+          'discount codes, fulfilled manually by an admin.'
+    )
+
+
+def private_progress_content(kind: str, interaction: discord.Interaction) -> dict:
+    gid, uid = interaction.guild_id, interaction.user.id
+    if kind == 'profile':
+        return {'content': profile_progress_text(gid, uid, interaction.user.display_name)}
+    if kind == 'streak':
+        return {'content': streak_progress_text(gid, uid)}
+    if kind == 'ranks':
+        return {'embed': ranks_progress_embed(gid, uid)}
+    if kind == 'weekly':
+        return {'content': weekly_progress_text(gid, uid)}
+    if kind == 'starter':
+        return {'content': starter_progress_text(gid, uid)}
+    raise ValueError(f'Unknown progress view: {kind}')
+
+
+class PrivateProgressView(discord.ui.View):
+    """Owner-only, short-lived refresh control for personal progress responses."""
+    def __init__(self, user_id: int, kind: str):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.kind = kind
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                'This progress panel belongs to another member.', ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='Refresh Progress', emoji='🔄', style=discord.ButtonStyle.secondary)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID:
+            return await interaction.response.send_message(
+                'This panel is only available in GYMGUILD.', ephemeral=True)
+        await interaction.response.edit_message(
+            content=None, embed=None,
+            **private_progress_content(self.kind, interaction), view=self,
+        )
 
 
 class PlayerStatsView(discord.ui.View):
