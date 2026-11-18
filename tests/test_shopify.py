@@ -1,6 +1,14 @@
 """Shopify storefront and reward-code integration regression tests.
 
 All tests are offline: no Shopify order is submitted and no real discount created.
+
+
+READING GUIDE
+-------------
+Simulates Shopify responses and reward tickets. No live orders or discounts are created; tests verify exact order matching and non-duplicated reward codes.
+
+Each setUp() uses a temporary SQLite database rather than GuildKeeper's
+real player database. Assertions compare actual results with expected rules.
 """
 import os
 import tempfile
