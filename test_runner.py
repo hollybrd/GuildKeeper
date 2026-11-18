@@ -3,6 +3,13 @@
 Staff select an existing non-bot test member. Diagnostics only READ player
 progress, roles and panel state. The checklist records staff observations;
 it never simulates real Discord interactions or mutates quest/XP state.
+
+
+READING GUIDE
+-------------
+The Test Runner is a staff-guided checklist, not a Discord account simulator.
+It reads the real member's progress for diagnostics and stores manual test notes
+in a separate SQLite table. It never changes XP, quests, roles or rewards.
 """
 import sqlite3
 import discord
@@ -34,6 +41,7 @@ TEST_KEYS = {key for key, _, _ in TEST_CASES}
 STATUS = {'passed', 'failed', 'skipped'}
 
 
+# Create the QA-results table independently of member progression tables.
 def ensure_table():
     with api.connect() as db:
         db.execute('''CREATE TABLE IF NOT EXISTS test_runner_results (
@@ -45,6 +53,7 @@ def ensure_table():
         )''')
 
 
+# Keep one status per scenario and tester, with moderator attribution.
 def save_result(gid, uid, case_key, status, note, actor_id):
     if case_key not in TEST_KEYS or status not in STATUS:
         raise ValueError('Invalid test case or status')
@@ -61,6 +70,7 @@ def save_result(gid, uid, case_key, status, note, actor_id):
           (gid, uid, case_key, status, note[:500], actor_id, api.utc_now().isoformat()))
 
 
+# Load saved results from previous runs/restarts.
 def results(gid, uid):
     ensure_table()
     with api.connect() as db:
@@ -70,6 +80,7 @@ def results(gid, uid):
     return {row['case_key']: dict(row) for row in rows}
 
 
+# Display what was passed, failed, skipped or has not yet been tested.
 def progress_text(gid, uid, *, detailed=True):
     records = results(gid, uid)
     counts = {state: sum(x['status'] == state for x in records.values()) for state in STATUS}
@@ -89,6 +100,7 @@ def progress_text(gid, uid, *, detailed=True):
     return '\n'.join(lines)[:1950]
 
 
+# Read a tester's current GuildKeeper state without changing it.
 def snapshot(gid, uid):
     """Read-only diagnostics; claims do not prove a human clicked the right UI."""
     with api.connect() as db:
@@ -137,6 +149,7 @@ def snapshot(gid, uid):
     }
 
 
+# Present database data clearly, but do not claim it proves a button works.
 def snapshot_embed(gid, uid):
     info = snapshot(gid, uid)
     e = discord.Embed(
@@ -162,6 +175,7 @@ def snapshot_embed(gid, uid):
     return e
 
 
+# Restrict test reports to Manage Server users and the owner of the private menu.
 def permitted(interaction, owner_id):
     return (interaction.guild_id == api.GUILD_ID
             and interaction.user.id == owner_id
@@ -180,6 +194,7 @@ class Private(discord.ui.View):
         return True
 
 
+# Require a normal, non-admin account for authentic permission testing.
 class TestMemberSelect(discord.ui.UserSelect):
     def __init__(self):
         super().__init__(placeholder='Select your separate test member account',
@@ -209,6 +224,7 @@ class TestMemberPicker(Private):
         self.add_item(TestMemberSelect())
 
 
+# Offer the checklist, current database state and saved report.
 class RunnerMenu(Private):
     def __init__(self, owner_id, tester_id):
         super().__init__(owner_id)
@@ -233,6 +249,7 @@ class RunnerMenu(Private):
             ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
+# Show exactly what the tester should do before a moderator records a result.
 class ScenarioSelect(discord.ui.Select):
     def __init__(self):
         super().__init__(placeholder='Select one live testing scenario',
@@ -265,6 +282,7 @@ class ScenarioPicker(Private):
         self.add_item(ScenarioSelect())
 
 
+# Collect evidence from a failed live test instead of simply marking it red.
 class FailureNote(discord.ui.Modal):
     def __init__(self, owner_id, tester_id, key):
         super().__init__(title='Record Test Failure', timeout=300)
@@ -292,6 +310,7 @@ class FailureNote(discord.ui.Modal):
             ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
+# Record observed outcomes; this does not simulate game actions.
 class ScenarioResultMenu(Private):
     def __init__(self, owner_id, tester_id, key):
         super().__init__(owner_id)
