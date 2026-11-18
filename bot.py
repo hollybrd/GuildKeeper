@@ -105,6 +105,12 @@ def setup_db():
           guild_id INTEGER, user_id INTEGER, rank TEXT, channel_id INTEGER,
           status TEXT, requested_at TEXT, fulfilled_at TEXT,
           UNIQUE(guild_id,user_id,rank));
+        CREATE TABLE IF NOT EXISTS purchase_orders (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL, order_reference TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending', submitted_at TEXT NOT NULL,
+          reviewed_at TEXT, reviewed_by INTEGER,
+          UNIQUE(guild_id,order_reference));
         CREATE TABLE IF NOT EXISTS pending_milestones (id INTEGER PRIMARY KEY AUTOINCREMENT,
           guild_id INTEGER, user_id INTEGER, kind TEXT, evidence TEXT,
           status TEXT DEFAULT 'pending', created_at TEXT,
@@ -123,6 +129,14 @@ def setup_db():
         CREATE TABLE IF NOT EXISTS schedule_posts (guild_id INTEGER NOT NULL, post_key TEXT NOT NULL,
           PRIMARY KEY(guild_id,post_key));
         ''')
+        # Carry forward any historical first-purchase requests without touching
+        # milestone claims, XP balances or existing moderator decisions.
+        db.execute(
+            'INSERT OR IGNORE INTO purchase_orders(guild_id,user_id,order_reference,status,submitted_at) '
+            'SELECT guild_id,user_id,evidence,status,created_at FROM pending_milestones '
+            "WHERE kind='purchase1' AND evidence IS NOT NULL AND TRIM(evidence) != '' "
+            "AND status IN ('pending','approved','rejected')"
+        )
         # Seed historic high-rank achievements before any new rank is awarded.
         # Keep the highest existing watermark on subsequent bot restarts.
         historic = db.execute(
@@ -140,6 +154,14 @@ def setup_db():
             if col not in columns:
                 db.execute(f'ALTER TABLE reward_tickets ADD COLUMN {col} TEXT')
         db.execute('INSERT OR IGNORE INTO v12_config(key,value) VALUES (?,?)',('activation_week',week_key()))
+        # Backfill the one-time Main Quest Completion reward for members who
+        # completed all six milestones before this feature was introduced.
+        # Existing milestone claims remain untouched; grant_once is idempotent.
+        historic_members = db.execute(
+            'SELECT DISTINCT guild_id,user_id FROM milestone_claims'
+        ).fetchall()
+        for prior in historic_members:
+            award_guild_completion_if_ready(db, prior['guild_id'], prior['user_id'])
 
 
 def migrate_monday_week_keys():
@@ -321,7 +343,16 @@ class Guildkeeper(commands.Bot):
         self.add_view(StarterTurnInView())
         self.add_view(WeeklyTurnInView())
         self.add_view(PlayerStatsView())
+        self.add_view(MilestoneBoardView())
         self.add_view(RewardTicketAdminView())
+        # Register outstanding review buttons after restarts.
+        with connect() as db:
+            pending_orders = db.execute(
+                "SELECT id FROM purchase_orders WHERE guild_id=? AND status='pending'",
+                (GUILD_ID,),
+            ).fetchall()
+        for order in pending_orders:
+            self.add_view(PurchaseReviewView(order['id']))
         scheduler.start()
 
 bot = Guildkeeper(command_prefix='!', intents=intents)
@@ -888,11 +919,97 @@ def weekly_status(gid, uid, wk):
     return kinds
 
 
+MILESTONE_QUESTS = (
+    ('first_week', 'First Weekly Quest', 25, 'Complete your first Weekly Side Quest'),
+    ('streak4', 'Four-Week Streak', 100, 'Complete 4 consecutive weekly quests'),
+    ('streak8', 'Eight-Week Streak', 150, 'Complete 8 consecutive weekly quests'),
+    ('streak12', 'Twelve-Week Streak', 200, 'Complete 12 consecutive weekly quests'),
+    ('boost1', 'Guild Booster', 50, 'Boost the GYMGUILD Discord server once'),
+    ('purchase1', 'First Purchase', 50, 'Have your first GYMGUILD order approved'),
+)
+MILESTONE_COMPLETION_BONUS = 500
+
+
+def milestone_progress(gid: int, uid: int) -> dict:
+    with connect() as db:
+        claimed = {r['kind'] for r in db.execute(
+            'SELECT kind FROM milestone_claims WHERE guild_id=? AND user_id=?',
+            (gid, uid),
+        )}
+        completed_weeks = db.execute(
+            'SELECT COUNT(*) FROM weekly_completions WHERE guild_id=? AND user_id=?',
+            (gid, uid),
+        ).fetchone()[0]
+    return {
+        'claimed': claimed,
+        'completed': sum(kind in claimed for kind, *_ in MILESTONE_QUESTS),
+        'total': len(MILESTONE_QUESTS),
+        'weekly_completions': completed_weeks,
+        'streak': active_streak(gid, uid),
+        'bonus_earned': 'guild_completion' in claimed,
+    }
+
+
+def milestone_quests_embed(gid: int, uid: int) -> discord.Embed:
+    progress = milestone_progress(gid, uid)
+    orders = purchase_order_summary(gid, uid)
+    embed = discord.Embed(
+        title='✦ GYMGUILD — MILESTONE QUESTS',
+        description=(
+            f'**Completed: {progress["completed"]}/{progress["total"]}** permanent milestones\n'
+            f'Complete them all to receive a one-time **+{MILESTONE_COMPLETION_BONUS} XP** Main Quest Completion bonus! '
+            'Your milestones remain unlocked even if you lose XP or your streak later breaks.'
+        ),
+        colour=discord.Colour.from_rgb(104, 163, 153),
+    )
+    for kind, label, xp, description in MILESTONE_QUESTS:
+        achieved = kind in progress['claimed']
+        detail = ''
+        if kind == 'first_week' and not achieved:
+            detail = f' ({progress["weekly_completions"]}/1 completed weeks)'
+        elif kind.startswith('streak') and not achieved:
+            weeks = int(kind.removeprefix('streak'))
+            detail = f' (active streak: {progress["streak"]}/{weeks} weeks)'
+        elif kind == 'purchase1':
+            detail = (f' ({orders["pending"]} pending review)'
+                      if orders['pending'] else
+                      f' ({orders["approved"]} approved orders)')
+        embed.add_field(
+            name=f'{"✅" if achieved else "⬜"} {label} — {xp} XP',
+            value=description + detail,
+            inline=False,
+        )
+    embed.add_field(
+        name='🏆 Main Quest Completion — +500 XP',
+        value='✅ Claimed permanently!' if progress['bonus_earned']
+              else f'🔒 {progress["completed"]}/{progress["total"]} milestones completed',
+        inline=False,
+    )
+    embed.set_footer(text='Use Submit Order below for first-purchase verification.')
+    return embed
+
+
+def award_guild_completion_if_ready(db, gid: int, uid: int) -> bool:
+    """Grant the six-milestone completion reward once, in the existing transaction."""
+    kinds = {row['kind'] for row in db.execute(
+        'SELECT kind FROM milestone_claims WHERE guild_id=? AND user_id=?',
+        (gid, uid),
+    )}
+    if all(kind in kinds for kind, *_ in MILESTONE_QUESTS):
+        return grant_once(
+            db, 'milestone_claims', gid, uid,
+            'guild_completion', MILESTONE_COMPLETION_BONUS,
+        )
+    return False
+
+
 def grant_once(db, table, gid, uid, kind, amount):
     cur = db.execute(f'INSERT OR IGNORE INTO {table}(guild_id,user_id,kind,claimed_at) VALUES (?,?,?,?)',
                      (gid,uid,kind,utc_now().isoformat()))
     if cur.rowcount:
         add_xp(gid,uid,amount,kind,db)
+        if table == 'milestone_claims' and kind != 'guild_completion':
+            award_guild_completion_if_ready(db, gid, uid)
         return True
     return False
 
@@ -1643,19 +1760,480 @@ async def admin_starter_award(interaction:discord.Interaction,member:discord.Mem
     await reply(interaction,f'{"Awarded" if ok else "Already claimed"}: {action.name} for {member.mention}.')
 
 
-@bot.tree.command(name='admin_milestone_review',description='Moderator: approve or reject a first-purchase milestone')
-@app_commands.checks.has_permissions(manage_guild=True)
-async def admin_milestone_review(interaction:discord.Interaction,member:discord.Member,approve:bool):
+def purchase_order_summary(gid: int, uid: int) -> dict:
+    """Count orders recorded through GuildKeeper, not all Shopify orders."""
+    with connect() as db:
+        records = db.execute(
+            'SELECT id,order_reference,status FROM purchase_orders '
+            'WHERE guild_id=? AND user_id=? ORDER BY id DESC',
+            (gid, uid),
+        ).fetchall()
+        earned = db.execute(
+            "SELECT 1 FROM milestone_claims WHERE guild_id=? AND user_id=? AND kind='purchase1'",
+            (gid, uid),
+        ).fetchone() is not None
+    return {
+        'approved': sum(row['status'] == 'approved' for row in records),
+        'pending': sum(row['status'] == 'pending' for row in records),
+        'rejected': sum(row['status'] == 'rejected' for row in records),
+        'earned_xp': 50 if earned else 0,
+        'potential_xp': 50 if not earned and any(row['status'] == 'pending' for row in records) else 0,
+        'orders': [dict(row) for row in records[:8]],
+    }
+
+
+def order_rewards_text(gid: int, uid: int) -> str:
+    summary = purchase_order_summary(gid, uid)
+    milestone = milestone_progress(gid, uid)
+    first = ('✅ Unlocked — 50 XP earned' if summary['earned_xp']
+             else f'⏳ {summary["pending"]} order awaiting approval — +50 XP possible'
+             if summary['pending'] else '🔒 Locked — first verified order awards 50 XP')
+    completion = ('✅ Claimed — 500 XP earned'
+                  if milestone['bonus_earned'] else
+                  f'🔒 {milestone["completed"]}/{milestone["total"]} milestones completed — 500 XP available')
+    return (
+        '**🛍️ Order XP**\n'
+        f'Approved orders: **{summary["approved"]}** · Pending: **{summary["pending"]}**\n'
+        f'First purchase: {first}\n'
+        f'**🏆 Main Quest Completion:** {completion}\n'
+        'Submit order references from **Milestone Quests** in the Player Hub.'
+    )
+
+
+def order_xp_embed(gid: int, uid: int) -> discord.Embed:
+    summary = purchase_order_summary(gid, uid)
+    embed = discord.Embed(
+        title='✦ GYMGUILD — ORDER XP',
+        description=('Submit your GYMGUILD Shopify order number for moderator review. '
+                     'Only your **first approved order** awards **50 XP**. '
+                     'Later orders may be tracked, but do not earn extra XP.'),
+        colour=discord.Colour.from_rgb(104, 163, 153),
+    )
+    embed.add_field(name='✅ Approved orders', value=str(summary['approved']), inline=True)
+    embed.add_field(name='⏳ Awaiting review', value=str(summary['pending']), inline=True)
+    embed.add_field(name='✦ Order XP earned', value=f"{summary['earned_xp']} / 50 XP", inline=True)
+    embed.add_field(
+        name='🎯 Potential XP',
+        value=(f"+{summary['potential_xp']} XP awaiting approval"
+               if summary['potential_xp'] else
+               'First-order reward already earned' if summary['earned_xp']
+               else '+50 XP available when your first order is approved'),
+        inline=False,
+    )
+    if summary['orders']:
+        status_icons = {'approved': '✅', 'pending': '⏳', 'rejected': '❌'}
+        lines = [
+            f"{status_icons.get(order['status'], '•')} "
+            f"`{discord.utils.escape_markdown(order['order_reference'])}` — "
+            f"{order['status'].title()}"
+            for order in summary['orders']
+        ]
+        embed.add_field(name='Your submitted orders (latest 8)', value='\n'.join(lines), inline=False)
+    else:
+        embed.add_field(name='Your submitted orders', value='No orders submitted yet.', inline=False)
+    embed.set_footer(text='Only GuildKeeper submissions are counted — not all Shopify orders.')
+    return embed
+
+
+def submit_purchase_order(gid: int, uid: int, reference: str) -> tuple[str, int | None]:
+    reference = reference.strip()
+    if not reference or len(reference) > 80 or any(ord(char) < 32 for char in reference):
+        return 'invalid', None
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
-        pending=db.execute('SELECT status FROM pending_milestones WHERE guild_id=? AND user_id=? AND kind="purchase1"',(interaction.guild_id,member.id)).fetchone()
-        if not pending or pending['status']!='pending': return await reply(interaction,'No pending purchase milestone for this member.')
-        db.execute('UPDATE pending_milestones SET status=? WHERE guild_id=? AND user_id=? AND kind="purchase1"',('approved' if approve else 'rejected',interaction.guild_id,member.id))
-        if approve: grant_once(db,'milestone_claims',interaction.guild_id,member.id,'purchase1',50)
-    if approve: await update_rank(member,get_xp(interaction.guild_id,member.id))
-    await reply(interaction,f'Purchase milestone {"approved (+50 XP)" if approve else "rejected"} for {member.mention}.')
+        row = db.execute(
+            'SELECT id,user_id,status FROM purchase_orders WHERE guild_id=? AND order_reference=?',
+            (gid, reference),
+        ).fetchone()
+        if row:
+            if row['user_id'] != uid:
+                return 'duplicate', None
+            if row['status'] != 'rejected':
+                return row['status'], row['id']
+            # A rejected order may be resubmitted only if no other order
+            # is awaiting review for this same member.
+            other_pending = db.execute(
+                "SELECT id FROM purchase_orders WHERE guild_id=? AND user_id=? "
+                "AND status='pending' AND id!=?",
+                (gid, uid, row['id']),
+            ).fetchone()
+            if other_pending:
+                return 'pending', other_pending['id']
+            db.execute(
+                "UPDATE purchase_orders SET status='pending',submitted_at=?,reviewed_at=NULL,reviewed_by=NULL "
+                'WHERE id=?', (utc_now().isoformat(), row['id']),
+            )
+            return 'submitted', row['id']
+        # Prevent multiple simultaneously pending orders for one member.
+        pending = db.execute(
+            "SELECT id FROM purchase_orders WHERE guild_id=? AND user_id=? AND status='pending'",
+            (gid, uid),
+        ).fetchone()
+        if pending:
+            return 'pending', pending['id']
+        cur = db.execute(
+            "INSERT INTO purchase_orders(guild_id,user_id,order_reference,status,submitted_at) "
+            "VALUES (?,?,?,'pending',?)",
+            (gid, uid, reference, utc_now().isoformat()),
+        )
+        return 'submitted', cur.lastrowid
 
 
+def submit_first_purchase_milestone(gid: int, uid: int, reference: str) -> str:
+    """Compatibility wrapper for older slash-command tests."""
+    status, _ = submit_purchase_order(gid, uid, reference)
+    return 'awarded' if status == 'approved' else status
+
+
+def review_purchase_order(gid: int, order_id: int, approver_id: int, approve: bool) -> tuple[str, int | None]:
+    """Resolve an individual pending order transactionally; only the first grants XP."""
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute(
+            'SELECT user_id,status FROM purchase_orders WHERE guild_id=? AND id=?',
+            (gid, order_id),
+        ).fetchone()
+        if row is None or row['status'] != 'pending':
+            return 'not_pending', None
+        db.execute(
+            'UPDATE purchase_orders SET status=?,reviewed_at=?,reviewed_by=? WHERE id=?',
+            ('approved' if approve else 'rejected', utc_now().isoformat(), approver_id, order_id),
+        )
+        if approve:
+            awarded = grant_once(db, 'milestone_claims', gid, row['user_id'], 'purchase1', 50)
+            return ('awarded' if awarded else 'approved_no_xp'), row['user_id']
+    return 'rejected', row['user_id']
+
+
+def review_first_purchase_milestone(gid: int, uid: int, approve: bool) -> str:
+    """Compatibility with the existing moderator command and stored requests."""
+    with connect() as db:
+        row = db.execute(
+            "SELECT id FROM purchase_orders WHERE guild_id=? AND user_id=? "
+            "AND status='pending' ORDER BY id LIMIT 1",
+            (gid, uid),
+        ).fetchone()
+    if row is None:
+        return 'not_pending'
+    result, _ = review_purchase_order(gid, row['id'], 0, approve)
+    return 'already_awarded' if result == 'approved_no_xp' else result
+
+
+async def post_purchase_review(guild: discord.Guild, user_id: int, order_id: int) -> bool:
+    channel = guild.get_channel(MOD_REVIEW_CHANNEL_ID) if MOD_REVIEW_CHANNEL_ID else None
+    if not isinstance(channel, discord.TextChannel):
+        log.warning('Purchase order pending but MOD_REVIEW_CHANNEL_ID is missing/invalid')
+        return False
+    with connect() as db:
+        row = db.execute(
+            'SELECT order_reference FROM purchase_orders WHERE guild_id=? AND id=?',
+            (guild.id, order_id),
+        ).fetchone()
+    if row is None:
+        return False
+    reference = discord.utils.escape_mentions(
+        discord.utils.escape_markdown(row['order_reference']))
+    embed = discord.Embed(
+        title='🛍️ ORDER XP — REVIEW REQUIRED',
+        description=(f'Member: <@{user_id}>\nOrder reference: **{reference}**\n'
+                     'Check this order in Shopify before approving.\n'
+                     '**First approved order: +50 XP. Subsequent orders: +0 XP.**'),
+        colour=discord.Colour.from_rgb(104, 163, 153),
+    )
+    try:
+        await channel.send(
+            embed=embed, view=PurchaseReviewView(order_id),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except (discord.Forbidden, discord.HTTPException):
+        log.exception('Could not post order XP review request %s', order_id)
+        return False
+    return True
+
+
+async def submit_order_from_interaction(interaction: discord.Interaction, reference: str) -> None:
+    if interaction.guild_id != GUILD_ID or not isinstance(interaction.user, discord.Member):
+        return await interaction.response.send_message('Use this in the GYMGUILD server.', ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    status, order_id = submit_purchase_order(interaction.guild_id, interaction.user.id, reference)
+    if status == 'submitted':
+        notified = await post_purchase_review(interaction.guild, interaction.user.id, order_id)
+        message = ('✅ **Order submitted for review.** '
+                   + ('A moderator will verify it in Shopify.' if notified else
+                      'Your submission is saved, but the moderator review channel needs configuring.'))
+    elif status == 'pending':
+        message = '⏳ You already have an order awaiting moderator review.'
+    elif status == 'approved':
+        message = '✅ This order has already been approved.'
+    elif status == 'duplicate':
+        message = '❌ That order reference is already registered to another Guild member. Contact a moderator.'
+    else:
+        message = '❌ Enter a valid Shopify order reference (1–80 characters, no private details).'
+    await interaction.followup.send(
+        message, embed=order_xp_embed(interaction.guild_id, interaction.user.id),
+        view=OrderXPView(interaction.user.id), ephemeral=True,
+    )
+
+
+def milestone_board_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title='✦ GYMGUILD — MILESTONE QUESTS',
+        description=(
+            'Complete special Guild achievements to earn permanent one-time XP rewards. '
+            'Select **My Progress** to view what you have unlocked privately, '
+            'or **Submit Order XP** to send a Shopify order for moderator approval.\n\n'
+            '**All six milestones unlock a one-time +500 XP Main Quest Completion bonus!**'
+        ),
+        colour=discord.Colour.from_rgb(104, 163, 153),
+    )
+    for _, name, xp, description in MILESTONE_QUESTS:
+        embed.add_field(name=f'✦ {name} — {xp} XP', value=description, inline=False)
+    embed.set_footer(text='GYMGUILD ✦ Where culture meets strength')
+    return embed
+
+
+class MilestoneBoardView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label='My Progress', emoji='🏆', style=discord.ButtonStyle.secondary,
+                       custom_id='guildkeeper:milestones:progress')
+    async def my_progress(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID:
+            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
+        await interaction.response.send_message(
+            embed=milestone_quests_embed(interaction.guild_id, interaction.user.id),
+            view=MilestoneQuestsView(interaction.user.id), ephemeral=True,
+        )
+
+    @discord.ui.button(label='Submit Order XP', emoji='🛍️', style=discord.ButtonStyle.primary,
+                       custom_id='guildkeeper:milestones:submit_order')
+    async def submit_order(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID:
+            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
+        await interaction.response.send_modal(OrderReferenceModal())
+
+
+@bot.tree.command(
+    name='admin_milestone_post',
+    description='Moderator: post or refresh the permanent Milestone Quests panel',
+)
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def admin_milestone_post(
+    interaction: discord.Interaction, channel: discord.TextChannel,
+):
+    if interaction.guild_id != GUILD_ID or channel.guild.id != GUILD_ID:
+        return await interaction.response.send_message(
+            'Choose a text channel in GYMGUILD.', ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    config_key = f'milestone-board-{GUILD_ID}'
+    with connect() as db:
+        row = db.execute(
+            'SELECT value FROM v12_config WHERE key=?', (config_key,),
+        ).fetchone()
+    previous = None
+    previous_channel = None
+    if row:
+        try:
+            channel_id, message_id = map(int, row['value'].split(':'))
+            previous_channel = interaction.guild.get_channel(channel_id)
+            if isinstance(previous_channel, discord.TextChannel):
+                previous = await previous_channel.fetch_message(message_id)
+        except (ValueError, discord.NotFound, discord.Forbidden, discord.HTTPException):
+            previous = None
+    try:
+        if previous is not None and previous_channel.id == channel.id:
+            await previous.edit(embed=milestone_board_embed(), view=MilestoneBoardView())
+            message = previous
+        else:
+            message = await channel.send(
+                embed=milestone_board_embed(), view=MilestoneBoardView())
+            if previous is not None:
+                try:
+                    await previous.delete()
+                except (discord.Forbidden, discord.HTTPException):
+                    log.warning('Old milestone board could not be deleted')
+    except (discord.Forbidden, discord.HTTPException):
+        log.exception('Failed to post milestone board')
+        return await interaction.followup.send(
+            'Could not post the board. Check View Channel, Send Messages, '
+            'Embed Links and Manage Messages permissions.', ephemeral=True)
+    with connect() as db:
+        db.execute(
+            'INSERT OR REPLACE INTO v12_config(key,value) VALUES (?,?)',
+            (config_key, f'{channel.id}:{message.id}'),
+        )
+    await interaction.followup.send(
+        f'✅ Milestone Quests panel posted or refreshed in {channel.mention}.', ephemeral=True,
+    )
+
+
+class MilestoneQuestsView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                'This Milestone Quests panel belongs to another member.', ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='Submit Order', emoji='🛍️', style=discord.ButtonStyle.primary)
+    async def submit_order(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(OrderReferenceModal())
+
+    @discord.ui.button(label='Refresh Progress', emoji='🔄', style=discord.ButtonStyle.secondary)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=milestone_quests_embed(interaction.guild_id, interaction.user.id),
+            view=self,
+        )
+
+
+class OrderReferenceModal(discord.ui.Modal, title='Submit a GYMGUILD order'):
+    order_reference = discord.ui.TextInput(
+        label='Shopify order number', placeholder='e.g. #1001',
+        min_length=1, max_length=80, required=True,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await submit_order_from_interaction(interaction, str(self.order_reference))
+
+
+class OrderXPView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message('This order panel belongs to another member.', ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='Submit Order', emoji='🛍️', style=discord.ButtonStyle.primary)
+    async def submit_order(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(OrderReferenceModal())
+
+    @discord.ui.button(label='Refresh Status', emoji='🔄', style=discord.ButtonStyle.secondary)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content='✦ Your latest order XP status',
+            embed=order_xp_embed(interaction.guild_id, interaction.user.id),
+            view=self,
+        )
+
+
+class PurchaseReviewView(discord.ui.View):
+    def __init__(self, order_id: int):
+        super().__init__(timeout=None)
+        self.order_id = order_id
+        # Stable custom IDs make pending review buttons persistent across restarts.
+        self.approve.custom_id = f'guildkeeper:order:approve:{order_id}'
+        self.reject.custom_id = f'guildkeeper:order:reject:{order_id}'
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild_id != GUILD_ID:
+            await interaction.response.send_message('Not available in this server.', ephemeral=True)
+            return False
+        if not is_ticket_mod(interaction):
+            await interaction.response.send_message('Only moderators can review orders.', ephemeral=True)
+            return False
+        return True
+
+    async def resolve(self, interaction: discord.Interaction, approved: bool):
+        await interaction.response.defer(ephemeral=True)
+        result, uid = review_purchase_order(
+            interaction.guild_id, self.order_id, interaction.user.id, approved)
+        if result == 'not_pending':
+            return await interaction.followup.send(
+                'This order was already reviewed or no longer exists.', ephemeral=True)
+        member = interaction.guild.get_member(uid)
+        if result == 'awarded' and member:
+            await update_rank(member, get_xp(interaction.guild_id, uid))
+        try:
+            original = interaction.message
+            if original is not None:
+                embed = original.embeds[0] if original.embeds else None
+                if embed:
+                    embed = embed.copy()
+                    embed.add_field(
+                        name='Decision', value=(
+                            f'{"✅ Approved" if approved else "❌ Rejected"} by {interaction.user.mention} '
+                            f'({"+50 XP" if result == "awarded" else "0 XP"})'
+                        ), inline=False,
+                    )
+                await original.edit(embed=embed, view=None)
+        except (discord.Forbidden, discord.HTTPException):
+            log.warning('Could not update reviewed purchase message %s', self.order_id)
+        await interaction.followup.send(
+            f'{"✅ Approved" if approved else "❌ Rejected"} order for <@{uid}>. '
+            f'{"50 XP awarded." if result == "awarded" else "No extra XP awarded."}',
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @discord.ui.button(label='Approve', emoji='✅', style=discord.ButtonStyle.success,
+                       custom_id='guildkeeper:order:approve')
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.resolve(interaction, True)
+
+    @discord.ui.button(label='Reject', emoji='❌', style=discord.ButtonStyle.danger,
+                       custom_id='guildkeeper:order:reject')
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.resolve(interaction, False)
+
+
+@bot.tree.command(name='milestone_purchase', description='Submit your GYMGUILD order number for review')
+@app_commands.guild_only()
+async def milestone_purchase(interaction: discord.Interaction, order_reference: str):
+    await submit_order_from_interaction(interaction, order_reference)
+
+
+@bot.tree.command(name='admin_milestone_pending', description='Moderator: privately list orders awaiting review')
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def admin_milestone_pending(interaction: discord.Interaction):
+    if interaction.guild_id != GUILD_ID:
+        return await interaction.response.send_message('This command belongs to GYMGUILD.', ephemeral=True)
+    with connect() as db:
+        rows = db.execute(
+            "SELECT id,user_id,order_reference FROM purchase_orders "
+            "WHERE guild_id=? AND status='pending' ORDER BY id LIMIT 15",
+            (interaction.guild_id,),
+        ).fetchall()
+    if not rows:
+        return await interaction.response.send_message('✅ No pending orders.', ephemeral=True)
+    lines = [
+        f'<@{row["user_id"]}> — `{discord.utils.escape_markdown(row["order_reference"])}` '
+        f'(order #{row["id"]})'
+        for row in rows
+    ]
+    await interaction.response.send_message(
+        '🛍️ **Pending order reviews**\n' + '\n'.join(lines)
+        + '\nUse the buttons in the moderator review channel, or /admin_milestone_review.',
+        ephemeral=True, allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@bot.tree.command(name='admin_milestone_review',description='Moderator: approve or reject the oldest pending order')
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def admin_milestone_review(interaction: discord.Interaction, member: discord.Member, approve: bool):
+    if interaction.guild_id != GUILD_ID:
+        return await reply(interaction, 'This command belongs to GYMGUILD.')
+    result = review_first_purchase_milestone(interaction.guild_id, member.id, approve)
+    if result == 'not_pending':
+        return await reply(interaction, 'No pending order for this member.')
+    if result == 'awarded':
+        await update_rank(member, get_xp(interaction.guild_id, member.id))
+        return await reply(interaction, f'✅ First order approved: **+50 XP** for {member.mention}.')
+    if result == 'already_awarded':
+        return await reply(interaction, f'✅ Additional order approved for {member.mention}; no further XP (one-time reward).')
+    return await reply(interaction, f'❌ Order rejected for {member.mention}. They may resubmit.')
 
 
 REWARD_RANKS={'Master':10,'Legend':15,'Paragon':20}
@@ -2171,6 +2749,7 @@ def player_stats_embed():
     embed.add_field(name='▶️ Resume XP', value='End an active pause early and resume earning XP; the pause is not refunded', inline=False)
     embed.add_field(name='🔔 Guild Blast', value='Opt in or out of Guild announcement mentions at any time', inline=False)
     embed.add_field(name='🎟️ Claim Reward', value='See eligible one-time rank rewards and open a private ticket with admins', inline=False)
+    embed.add_field(name='🏆 Milestone Quests', value='See your milestones and progress, and submit Shopify orders', inline=False)
     embed.set_footer(text='GYMGUILD ✦ Where culture meets strength')
     return embed
 
@@ -2269,6 +2848,16 @@ class PlayerStatsView(discord.ui.View):
             'Choose below to change your preference.',
             view=GuildBlastToggleView(interaction.user.id), ephemeral=True)
 
+    @discord.ui.button(label='Milestone Quests', emoji='🏆', style=discord.ButtonStyle.secondary,
+                       custom_id='guildkeeper:stats:milestone_quests', row=2)
+    async def milestone_quests_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID:
+            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
+        await interaction.response.send_message(
+            embed=milestone_quests_embed(interaction.guild_id, interaction.user.id),
+            view=MilestoneQuestsView(interaction.user.id), ephemeral=True,
+        )
+
     @discord.ui.button(label='Claim Reward', emoji='🎟️', style=discord.ButtonStyle.primary,
                        custom_id='guildkeeper:stats:reward_ticket', row=1)
     async def reward_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2276,8 +2865,9 @@ class PlayerStatsView(discord.ui.View):
             return await interaction.response.send_message('This button is not available here.', ephemeral=True)
         await interaction.response.send_message(
             '🎟️ **Guild Rewards**\n\n' + reward_eligibility_text(interaction.guild_id, interaction.user.id)
-            + '\n\nSelect an **eligible, unclaimed** reward below to open a private ticket with Guild admins. '
-              'Rewards are one-time Shopify discount codes and must be fulfilled manually by an admin.',
+            + '\n\n' + order_rewards_text(interaction.guild_id, interaction.user.id)
+            + '\n\nSelect an **eligible, unclaimed** rank reward below to open a private ticket with Guild admins. '
+              'Order XP is reviewed from Milestone Quests; rank rewards are one-time Shopify discount codes.',
             view=RewardChoiceView(interaction.user.id), ephemeral=True)
 
 
