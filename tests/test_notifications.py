@@ -36,6 +36,55 @@ class NotificationTests(unittest.TestCase):
                        (self.gid, self.uid, bot.week_key(), bot.utc_now().isoformat()))
         self.assertIn('weekly XP earning has resumed', bot.weekly_progress_text(self.gid, self.uid))
 
+    def test_pause_buttons_follow_current_state(self):
+        labels = {b.label: b for b in bot.PausePanelView(self.uid).children}
+        self.assertFalse(labels['Activate Pause'].disabled)
+        self.assertTrue(labels['Resume XP'].disabled)
+        with bot.connect() as db:
+            db.execute('INSERT INTO pauses(guild_id,user_id,week_key,created_at) VALUES (?,?,?,?)',
+                       (self.gid, self.uid, bot.week_key(), bot.utc_now().isoformat()))
+        with self.subTest('paused'):
+            self.assertEqual(bot.pause_button_state(self.gid, self.uid), (False, True))
+        with bot.connect() as db:
+            db.execute('INSERT INTO resumed_pauses(guild_id,user_id,week_key,resumed_at) VALUES (?,?,?,?)',
+                       (self.gid, self.uid, bot.week_key(), bot.utc_now().isoformat()))
+        self.assertEqual(bot.pause_button_state(self.gid, self.uid), (False, False))
+
+    def test_reward_buttons_show_locked_available_and_claimed(self):
+        original_gid = bot.GUILD_ID
+        bot.GUILD_ID = self.gid
+        try:
+            view = bot.RewardChoiceView(self.uid)
+            self.assertTrue(next(b for b in view.children if b.label.startswith('Master')).disabled)
+            with bot.connect() as db:
+                db.execute('INSERT INTO rank_unlocks(guild_id,user_id,rank,unlocked_at) VALUES (?,?,?,?)',
+                           (self.gid, self.uid, 'Master', bot.utc_now().isoformat()))
+            unlocked = bot.RewardChoiceView(self.uid)
+            self.assertFalse(next(b for b in unlocked.children if b.label.startswith('Master')).disabled)
+            with bot.connect() as db:
+                db.execute(
+                    "INSERT INTO reward_tickets(guild_id,user_id,rank,channel_id,status,requested_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (self.gid, self.uid, 'Master', 51234, 'open', bot.utc_now().isoformat()))
+            claimed = bot.RewardChoiceView(self.uid)
+            button = next(b for b in claimed.children if b.label.startswith('Master'))
+            self.assertTrue(button.disabled)
+            self.assertIn('Claimed', button.label)
+        finally:
+            bot.GUILD_ID = original_gid
+
+    def test_dm_preferences_disable_unavailable_action(self):
+        original_gid = bot.GUILD_ID
+        bot.GUILD_ID = self.gid
+        try:
+            enabled = bot.BotDMToggleView(self.uid)
+            self.assertTrue(next(b for b in enabled.children if b.label == 'Enable Bot DMs').disabled)
+            bot.set_bot_dms(self.gid, self.uid, False)
+            disabled = bot.BotDMToggleView(self.uid)
+            self.assertTrue(next(b for b in disabled.children if b.label == 'Disable Bot DMs').disabled)
+        finally:
+            bot.GUILD_ID = original_gid
+
     def test_dm_preference_defaults_enabled_and_persists(self):
         self.assertTrue(bot.bot_dms_enabled(self.gid, self.uid))
         bot.set_bot_dms(self.gid, self.uid, False)
