@@ -210,7 +210,11 @@ def streak_weeks(gid, uid):
     with connect() as db:
         completed = {r['week_key'] for r in db.execute('SELECT week_key FROM weekly_completions WHERE guild_id=? AND user_id=?', (gid,uid))}
         completed |= {r['week_key'] for r in db.execute('SELECT week_key FROM admin_streak_weeks WHERE guild_id=? AND user_id=?', (gid,uid))}
-        paused = {r['week_key'] for r in db.execute('SELECT week_key FROM pauses WHERE guild_id=? AND user_id=?', (gid,uid))}
+        paused = {r['week_key'] for r in db.execute(
+            'SELECT p.week_key FROM pauses p WHERE p.guild_id=? AND p.user_id=? '
+            'AND NOT EXISTS (SELECT 1 FROM resumed_pauses r '
+            'WHERE r.guild_id=p.guild_id AND r.user_id=p.user_id AND r.week_key=p.week_key)',
+            (gid, uid))}
     return completed, paused
 
 def active_streak(gid, uid):
@@ -1259,6 +1263,7 @@ async def credit_action(message, kind, xp, fingerprint):
         add_xp(gid,uid,xp,'Weekly '+wk+' '+kind,db)
         grant_once(db,'starter_claims',gid,uid,'first_steps',10)
         kinds = {r['kind'] for r in db.execute('SELECT kind FROM weekly_actions WHERE guild_id=? AND user_id=? AND week_key=?',(gid,uid,wk))}
+        completed_now = False
         if len(kinds) == 4:
             finished = db.execute('INSERT OR IGNORE INTO weekly_completions VALUES (?,?,?,?)',
                                   (gid,uid,wk,utc_now().isoformat()))
@@ -1266,7 +1271,12 @@ async def credit_action(message, kind, xp, fingerprint):
                 add_xp(gid,uid,50,'Weekly completion '+wk,db)
                 grant_once(db,'milestone_claims',gid,uid,'first_week',MILESTONE_XP['first_week'])
                 n = db.execute('SELECT COUNT(*) n FROM weekly_completions WHERE guild_id=? AND user_id=?',(gid,uid)).fetchone()['n']
-                # Milestones for cumulative weekly completions; streak-based awards are handled at reset.
+                # A full set is automatically turned in: the button simply confirms completion.
+                completed_now = True
+    if completed_now:
+        # After committing the weekly completion, use the same streak rules
+        # as rank progression (including admin credits and protected pauses).
+        award_earned_streak_milestones(gid, uid)
     await update_rank(message.author,get_xp(gid,uid))
     try:
         await message.add_reaction('✦')
@@ -1300,6 +1310,23 @@ async def on_message(message: discord.Message):
         await credit_action(message,'hobby',25,fingerprint)
 
 
+def week_needs_inactivity_penalty(db, gid: int, uid: int, wk: str) -> bool:
+    """A week is inactive only if NONE of its four objectives was recorded."""
+    paused = db.execute(
+        'SELECT 1 FROM pauses p WHERE p.guild_id=? AND p.user_id=? AND p.week_key=? '
+        'AND NOT EXISTS (SELECT 1 FROM resumed_pauses r '
+        'WHERE r.guild_id=p.guild_id AND r.user_id=p.user_id AND r.week_key=p.week_key)',
+        (gid, uid, wk),
+    ).fetchone()
+    if paused:
+        return False
+    return db.execute(
+        "SELECT 1 FROM weekly_actions WHERE guild_id=? AND user_id=? AND week_key=? "
+        "AND kind IN ('training1','training2','gym','hobby') LIMIT 1",
+        (gid, uid, wk),
+    ).fetchone() is None
+
+
 async def settle_previous_weeks():
     guild = bot.get_guild(GUILD_ID)
     if guild is None:
@@ -1323,25 +1350,11 @@ async def settle_previous_weeks():
                 db.execute('BEGIN IMMEDIATE')
                 inserted = db.execute('INSERT OR IGNORE INTO weekly_settlements VALUES (?,?,?,?)',(GUILD_ID,uid,wk,utc_now().isoformat()))
                 if inserted.rowcount:
-                    paused = db.execute('SELECT 1 FROM pauses WHERE guild_id=? AND user_id=? AND week_key=?',(GUILD_ID,uid,wk)).fetchone()
-                    trained = db.execute('SELECT 1 FROM weekly_actions WHERE guild_id=? AND user_id=? AND week_key=? AND kind IN ("training1","training2")',(GUILD_ID,uid,wk)).fetchone()
-                    if not paused and not trained:
+                    if week_needs_inactivity_penalty(db, GUILD_ID, uid, wk):
                         add_xp(GUILD_ID,uid,-25,'Inactive week '+wk,db)
                         changed = True
-                    # Streak milestones only after consecutive completed cycles.
-                    if not paused and db.execute('SELECT 1 FROM weekly_completions WHERE guild_id=? AND user_id=? AND week_key=?',(GUILD_ID,uid,wk)).fetchone():
-                        n = 0
-                        day = cursor
-                        for _ in range(12):
-                            key = day.date().isoformat()
-                            if db.execute('SELECT 1 FROM weekly_completions WHERE guild_id=? AND user_id=? AND week_key=?',(GUILD_ID,uid,key)).fetchone():
-                                n += 1
-                            elif not db.execute('SELECT 1 FROM pauses WHERE guild_id=? AND user_id=? AND week_key=?',(GUILD_ID,uid,key)).fetchone():
-                                break
-                            day -= timedelta(days=7)
-                        if n >= 4: changed |= grant_once(db,'milestone_claims',GUILD_ID,uid,'streak4',MILESTONE_XP['streak4'])
-                        if n >= 8: changed |= grant_once(db,'milestone_claims',GUILD_ID,uid,'streak8',MILESTONE_XP['streak8'])
-                        if n >= 12: changed |= grant_once(db,'milestone_claims',GUILD_ID,uid,'streak12',MILESTONE_XP['streak12'])
+                    # Streak milestones are claimed when week 4/8/12 completes.
+                    # The startup backfill handles historical missing claims.
             cursor += timedelta(days=7)
         if changed:
             member = guild.get_member(uid)
@@ -1387,18 +1400,35 @@ class WeeklyTurnInView(discord.ui.View):
                 'Use `/weekly_progress` to see what remains.',
                 ephemeral=True)
             return
+        # Completing all four tasks already auto-recorded the turn-in and
+        # credited XP; the button gives confirmation without rewarding twice.
+        with connect() as db:
+            recorded = db.execute(
+                'SELECT 1 FROM weekly_completions WHERE guild_id=? AND user_id=? AND week_key=?',
+                (interaction.guild_id, interaction.user.id, wk),
+            ).fetchone() is not None
+        if not recorded:
+            return await interaction.response.send_message(
+                'All four objectives are recorded, but the weekly completion is still '
+                'being processed. Refresh your progress and try again.', ephemeral=True)
         streak = weekly_streak_with_current(interaction.guild_id, interaction.user.id, wk)
         await interaction.response.send_message(
             '🏆 **Congratulations! Weekly Side Quest complete!** '
-            'You have completed all 4 objectives and earned your weekly completion bonus. '
-            f'🔥 **Your weekly streak: {streak} week(s)!**',
+            'All four objectives have been **automatically turned in**, and your '
+            'weekly completion bonus has already been awarded. '
+            f'🔥 **Your current streak: {streak} week(s)!** '
+            'You do not need to press Turn In to keep your streak.',
             ephemeral=True)
 
 
 def weekly_progress_text(gid: int, uid: int) -> str:
     kinds = weekly_status(gid, uid, week_key())
     lines = [f'{"✅" if key in kinds else "⬜"} {name}' for key, name in WEEKLY_OBJECTIVES]
-    return '⚔️ **Your Weekly Side Quest**\n' + '\n'.join(lines) + f'\n**{len(kinds)}/4 objectives completed.**'
+    complete = len(kinds) == 4
+    return ('⚔️ **Your Weekly Side Quest**\n' + '\n'.join(lines) +
+            f'\n**{len(kinds)}/4 objectives completed.**\n' +
+            ('🏆 **Automatically turned in!** Your completed week counts toward your streak.'
+             if complete else 'Complete all four to turn in automatically — no button required.'))
 
 
 @bot.tree.command(name='weekly_progress',description='See your four weekly quest objectives')
@@ -2963,7 +2993,7 @@ def weekly_board_embed():
     embed.add_field(name='​', value='​', inline=False)
     embed.add_field(name='🏆 Completion bonus — 50 XP', value='Complete all four objectives to claim the bonus automatically.', inline=False)
     embed.add_field(name='━━━━━━━━━━━━━━━━━━━━', value='**Your progress & information**', inline=False)
-    embed.add_field(name='Track your progress', value='Use the **Turn In Quest** button below for a private progress check, or `/weekly_progress`, `/streak`, `/pause_status`. Messages must be meaningful (at least 25 characters and 5 words). **Quest progress updates automatically** as qualifying messages are posted.', inline=False)
+    embed.add_field(name='Track your progress', value='Complete all four objectives to **automatically turn in your weekly quest** and advance your streak. The **Turn In Quest** button confirms your completion and shows your streak. Use **View Progress**, `/weekly_progress`, `/streak` or `/pause_status`. Messages must be meaningful (at least 25 characters and 5 words).', inline=False)
     embed.add_field(name='Next reset', value=f'<t:{int(reset.timestamp())}:F> · <t:{int(reset.timestamp())}:R>', inline=False)
     embed.set_footer(text=f'Guildkeeper Weekly Side Quest • {week_key()}')
     return embed
