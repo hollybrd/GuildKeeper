@@ -1023,6 +1023,117 @@ def grant_once(db, table, gid, uid, kind, amount):
     return False
 
 
+def reset_milestone_test_data(gid: int, uid: int, target: str) -> dict:
+    """Undo this member's current test milestone rewards without touching others.
+
+    Preserve order and XP audit history. Old review cards become inert because
+    the order rows no longer have 'pending' status. The one-time completion
+    bonus is also reversed if a prerequisite milestone is reset.
+    """
+    if target not in ('order', 'boost', 'both'):
+        raise ValueError('Choose order, boost or both')
+    kinds = (('purchase1', 'boost1') if target == 'both' else
+             ('purchase1',) if target == 'order' else ('boost1',))
+    result = {'order': 0, 'boost': 0, 'completion': 0, 'xp_reversed': 0, 'orders_archived': 0}
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        existing = {row['kind'] for row in db.execute(
+            "SELECT kind FROM milestone_claims WHERE guild_id=? AND user_id=?",
+            (gid, uid),
+        )}
+        to_reset = [kind for kind in kinds if kind in existing]
+        if to_reset and 'guild_completion' in existing:
+            to_reset.append('guild_completion')
+        for kind in to_reset:
+            # The claim is unique but the XP log is append-only across earlier
+            # admin resets, so reverse only its most recent matching award.
+            previous = db.execute(
+                "SELECT amount FROM xp_log WHERE guild_id=? AND user_id=? "
+                "AND reason=? AND amount>0 ORDER BY id DESC LIMIT 1",
+                (gid, uid, kind),
+            ).fetchone()
+            amount = previous['amount'] if previous else 0
+            db.execute(
+                "DELETE FROM milestone_claims WHERE guild_id=? AND user_id=? AND kind=?",
+                (gid, uid, kind),
+            )
+            if amount:
+                add_xp(gid, uid, -amount, f'Admin milestone test reset: {kind}', db)
+                result['xp_reversed'] += amount
+            if kind == 'purchase1':
+                result['order'] = 1
+            elif kind == 'boost1':
+                result['boost'] = 1
+            else:
+                result['completion'] = 1
+        if 'purchase1' in kinds:
+            # Do not destroy verification or moderator history. Archiving
+            # every prior row prevents a stale approval button from granting XP.
+            result['orders_archived'] = db.execute(
+                "UPDATE purchase_orders SET status='test_reset' "
+                "WHERE guild_id=? AND user_id=? AND status IN ('pending','approved','rejected','cancelled')",
+                (gid, uid),
+            ).rowcount
+    return result
+
+
+@bot.tree.command(
+    name='admin_milestone_test_reset',
+    description='Admin test: reset your own Order XP, Server Boost XP, or both',
+)
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+@app_commands.describe(
+    target='Choose which of YOUR milestone awards to reset',
+    confirm='Must be True to reset your milestone claim and reverse its XP',
+)
+@app_commands.choices(target=[
+    app_commands.Choice(name='Order XP', value='order'),
+    app_commands.Choice(name='Server Boost XP', value='boost'),
+    app_commands.Choice(name='Both', value='both'),
+])
+async def admin_milestone_test_reset(
+    interaction: discord.Interaction, target: app_commands.Choice[str], confirm: bool,
+):
+    if interaction.guild_id != GUILD_ID or not isinstance(interaction.user, discord.Member):
+        return await interaction.response.send_message(
+            'This command is only available inside GYMGUILD.', ephemeral=True)
+    if not confirm:
+        return await interaction.response.send_message(
+            'No changes made. Set **confirm: True** to reset **your own** selected '
+            'milestone claim(s), reverse their recorded XP and (if applicable) '
+            'the +500 XP Main Quest Completion bonus. For Order XP, old '
+            'submission records are archived, not deleted; other progress stays intact. '
+            'For Boost XP, an already-active boost must end before a new boost '
+            'event can automatically award the milestone again.',
+            ephemeral=True,
+        )
+    await interaction.response.defer(ephemeral=True)
+    try:
+        result = reset_milestone_test_data(
+            interaction.guild_id, interaction.user.id, target.value)
+    except sqlite3.Error:
+        log.exception('Could not reset milestone test data for member %s', interaction.user.id)
+        return await interaction.followup.send(
+            'Reset failed: database unchanged by the unsuccessful transaction.',
+            ephemeral=True,
+        )
+    await update_rank(interaction.user, get_xp(interaction.guild_id, interaction.user.id))
+    await interaction.followup.send(
+        f'🧪 **Milestone test reset: {target.name}**\\n'
+        f'Order claim cleared: **{"Yes" if result["order"] else "No claim found"}**\\n'
+        f'Boost claim cleared: **{"Yes" if result["boost"] else "No claim found"}**\\n'
+        f'Main Quest Completion claim reversed: **{"Yes" if result["completion"] else "Not needed"}**\\n'
+        f'Historical order requests archived: **{result["orders_archived"]}**\\n'
+        f'XP reversed: **{result["xp_reversed"]}**\\n\\n'
+        'New Order XP requests can now be tested through Milestone Quests. '
+        'To re-test automatic boost XP, Discord must emit a new boost-start '
+        'event (an existing active boost does not trigger it).',
+        ephemeral=True,
+    )
+
+
 def longest_streak(gid: int, uid: int) -> int:
     """Longest run of completed weeks, including admin credits; pauses preserve runs."""
     completed, paused = streak_weeks(gid, uid)
@@ -1825,7 +1936,7 @@ def order_xp_embed(gid: int, uid: int) -> discord.Embed:
         inline=False,
     )
     if summary['orders']:
-        status_icons = {'approved': '✅', 'pending': '⏳', 'rejected': '❌', 'cancelled': '🚫'}
+        status_icons = {'approved': '✅', 'pending': '⏳', 'rejected': '❌', 'cancelled': '🚫', 'test_reset': '🧪'}
         lines = [
             f"{status_icons.get(order['status'], '•')} "
             f"`{discord.utils.escape_markdown(order['order_reference'])}` — "
