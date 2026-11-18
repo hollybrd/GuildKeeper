@@ -4,6 +4,7 @@ Installed by bot.py, which provides the existing XP/quest/reward functions.
 No legacy admin slash commands are replaced.
 """
 import discord
+import panel_health
 from discord import app_commands
 
 api = None
@@ -100,7 +101,7 @@ def hub_embed():
         ('🎟️ Rewards & Orders', 'Review outstanding requests in the existing moderator channel.'),
         ('📣 Announcements', 'Compose, preview and publish without pings.'),
         ('📋 Audit Log', 'Inspect Admin Hub changes.'),
-        ('⚙️ Bot Controls', 'Channel health, Player Hub refresh, leaderboard and rank syncing.'),
+        ('⚙️ Bot Controls', 'Permanent panel health, Player Hub refresh, leaderboard and rank syncing.'),
     ):
         embed.add_field(name=title, value=description, inline=False)
     embed.set_footer(text='Only staff with Manage Server permission can open the controls')
@@ -429,9 +430,25 @@ class ControlMenu(PrivateMenu):
             'Sync all member rank roles to their stored XP and unlocks? This does not change XP.',
             view=ConfirmRankSync(self.owner_id), ephemeral=True)
 
+    @discord.ui.button(label='Permanent Panels', emoji='🛡️', style=discord.ButtonStyle.primary, row=1)
+    async def permanent_panels(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)
+        checks = await panel_health.snapshot(api, interaction.guild)
+        await interaction.followup.send(
+            panel_health.render(checks), view=PanelHealthMenu(self.owner_id), ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none())
+
     @discord.ui.button(label='Health Check', emoji='🔍', style=discord.ButtonStyle.secondary, row=1)
     async def health(self, interaction, button):
         await interaction.response.edit_message(content=health_summary(interaction.guild), view=self)
+
+
+class PanelHealthMenu(PrivateMenu):
+    @discord.ui.button(label='Check Again', emoji='🔄', style=discord.ButtonStyle.primary)
+    async def refresh(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)
+        checks = await panel_health.snapshot(api, interaction.guild)
+        await interaction.edit_original_response(content=panel_health.render(checks), view=self)
 
 
 class ConfirmRankSync(PrivateMenu):
