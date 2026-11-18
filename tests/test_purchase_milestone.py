@@ -134,6 +134,33 @@ class PurchaseMilestoneTests(unittest.TestCase):
             self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, invalid), ('invalid', None))
         self.assertEqual(bot.purchase_order_summary(self.gid, self.uid)['orders'], [])
 
+    def test_permanent_milestone_board_and_pending_mod_review_buttons(self):
+        public = bot.MilestoneBoardView()
+        self.assertTrue(public.is_persistent())
+        self.assertEqual(
+            {button.label for button in public.children},
+            {'My Progress', 'Submit Order XP'},
+        )
+        review = bot.PurchaseReviewView(51)
+        self.assertTrue(review.is_persistent())
+        self.assertEqual(
+            {button.custom_id for button in review.children},
+            {'guildkeeper:order:approve:51', 'guildkeeper:order:reject:51'},
+        )
+        hub = bot.PlayerStatsView()
+        self.assertTrue(hub.is_persistent())
+        self.assertIn('Milestone Quests', {button.label for button in hub.children})
+        self.assertLessEqual(len(hub.children), 25)
+
+    def test_review_resubmission_retains_once_only_claim_after_restart(self):
+        _, first = bot.submit_purchase_order(self.gid, self.uid, 'test-1001')
+        self.assertEqual(bot.review_purchase_order(self.gid, first, 42, True)[0], 'awarded')
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 50)
+        bot.setup_db()
+        _, second = bot.submit_purchase_order(self.gid, self.uid, 'test-1002')
+        self.assertEqual(bot.review_purchase_order(self.gid, second, 42, True)[0], 'approved_no_xp')
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 50)
+
     def test_legacy_pending_purchase_is_migrated_without_awarding_xp(self):
         with bot.connect() as db:
             db.execute(
