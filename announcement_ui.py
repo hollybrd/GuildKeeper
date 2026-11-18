@@ -1,4 +1,11 @@
-"""Private Admin Hub screens for one-off and recurring GuildKeeper announcements."""
+"""Private Admin Hub screens for one-off and recurring GuildKeeper announcements.
+
+READING GUIDE
+-------------
+The clickable admin menus for announcements. This file gathers user inputs
+and confirms actions; announcements_scheduler.py owns persistence and posting.
+Most replies are ephemeral, meaning only the moderator sees them.
+"""
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -9,10 +16,12 @@ api = None
 TZ = ZoneInfo("Europe/London")
 
 
+# Ensure this is a moderator in the right server using their own open menu.
 def allowed(interaction, owner):
     return api.admin_hub.allowed(interaction) and interaction.user.id == owner
 
 
+# Shared owner-check on all private scheduler submenus.
 class Private(discord.ui.View):
     def __init__(self, owner):
         super().__init__(timeout=300)
@@ -37,6 +46,7 @@ def summary(row):
             f'{when_label(row)} · {ping} · **{row["status"]}**')
 
 
+# Build the upcoming announcements summary from saved database entries.
 def listing():
     rows = core.upcoming()
     if not rows:
@@ -51,6 +61,7 @@ def listing():
     return "\n\n".join(lines)[:3900]
 
 
+# First pick where the future message will be posted; verify bot channel permissions.
 class ChannelChoice(discord.ui.ChannelSelect):
     def __init__(self):
         super().__init__(placeholder="Choose the announcement channel",
@@ -76,6 +87,7 @@ class ChooseChannel(Private):
         self.add_item(ChannelChoice())
 
 
+# Offer one-off, daily, weekly and monthly schedules.
 class FrequencyChoice(discord.ui.Select):
     def __init__(self, existing=None):
         super().__init__(placeholder="How often should the message post?",
@@ -102,6 +114,7 @@ class FrequencyMenu(Private):
         self.add_item(FrequencyChoice(existing))
 
 
+# Collect title, body, UK-local time, image URL and optional GuildBlast mention.
 class ScheduleForm(discord.ui.Modal):
     def __init__(self, owner, channel_id, recurrence, existing=None):
         super().__init__(title="Schedule Guild Announcement", timeout=300)
@@ -151,6 +164,7 @@ class ScheduleForm(discord.ui.Modal):
             ephemeral=True,allowed_mentions=discord.AllowedMentions.none())
 
 
+# Preview is not publication. This button saves the job only after confirmation.
 class ConfirmSchedule(Private):
     def __init__(self,owner,data,existing=None):
         super().__init__(owner)
@@ -208,6 +222,7 @@ class AnnouncementSelect(discord.ui.Select):
             allowed_mentions=discord.AllowedMentions.none())
 
 
+# Select saved jobs for editing or cancellation.
 class UpcomingMenu(Private):
     def __init__(self,owner):
         super().__init__(owner)
@@ -220,6 +235,7 @@ class UpcomingMenu(Private):
                                                 allowed_mentions=discord.AllowedMentions.none())
 
 
+# Actions on one saved schedule: preview, edit, cancel or delete.
 class JobMenu(Private):
     def __init__(self,owner,job_id):
         super().__init__(owner)
@@ -257,6 +273,7 @@ class JobMenu(Private):
             view=ConfirmChange(self.owner,self.job_id,"deleted"),ephemeral=True)
 
 
+# Final safety prompt before disabling or deleting a future job.
 class ConfirmChange(Private):
     def __init__(self,owner,job_id,operation):
         super().__init__(owner)
@@ -283,6 +300,7 @@ class ConfirmChange(Private):
         await interaction.response.edit_message(content="No change made.",view=None)
 
 
+# Explain automatic weekly and monthly notices, which do not reset player XP.
 def automatic_summary():
     return ('📢 **Automatic notices**\n\n'
             '**Weekly Side Quest refresh** — posted once each week after the new quest board '
