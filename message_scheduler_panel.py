@@ -30,7 +30,8 @@ def status_lines():
         symbol="🟢" if policy["enabled"] else "⏸️"
         destination=f'<#{policy["channel_id"]}>' if policy["channel_id"] else "No channel"
         origin="Custom" if policy["configured"] else "Default"
-        lines.append(f"{symbol} **{name}** [{origin}]\n{trigger} | {destination}")
+        ping=" | 🔔 @GuildBlast" if policy["ping_guildblast"] else " | 🔕 No ping"
+        lines.append(f"{symbol} **{name}** [{origin}]\n{trigger} | {destination}{ping}")
     return lines
 
 
@@ -251,6 +252,7 @@ def automation_detail(kind):
     return (f'⚙️ **{name}**\nTrigger: {trigger}\n'
             f'Status: **{"Enabled" if policy["enabled"] else "Paused"}**\n'
             f'Channel: <#{policy["channel_id"]}>\n'
+            f'GuildBlast ping: **{"On" if policy["ping_guildblast"] else "Off"}**\n'
             f'Custom rule: {"Yes" if policy["configured"] else "No (using defaults)"}\n'
             f'Title: {policy["title"] or "(default event title)"}\n'
             f'Extra introduction: {policy["intro"] or "(none)"}\n\n'
@@ -272,18 +274,22 @@ class AutomationForm(discord.ui.Modal):
         self.enabled=discord.ui.TextInput(
             label="Enabled? yes or no",max_length=3,
             default="yes" if row is None or row["enabled"] else "no")
-        for field in (self.heading,self.intro,self.enabled):
+        self.ping=discord.ui.TextInput(
+            label="Ping @GuildBlast? yes or no",max_length=3,
+            default="yes" if row is not None and row["ping_guildblast"] else "no")
+        for field in (self.heading,self.intro,self.enabled,self.ping):
             self.add_item(field)
 
     async def on_submit(self,interaction):
         if not allowed(interaction) or interaction.user.id!=self.owner:
             return await interaction.response.send_message("Not authorised.",ephemeral=True)
         status=self.enabled.value.lower().strip()
-        if status not in ("yes","no"):
+        ping=self.ping.value.lower().strip()
+        if status not in ("yes","no") or ping not in ("yes","no"):
             return await interaction.response.send_message(
-                "Enabled must be yes or no.",ephemeral=True)
+                "Enabled and GuildBlast ping must each be yes or no.",ephemeral=True)
         try:
-            core.check_channel(interaction.guild,self.channel_id)
+            core.check_channel(interaction.guild,self.channel_id,ping=ping=="yes")
             if not self.heading.value.strip():
                 raise ValueError("An announcement title is required.")
         except ValueError as exc:
@@ -291,20 +297,23 @@ class AutomationForm(discord.ui.Modal):
         await interaction.response.send_message(
             f'**Confirm automation settings**\nEvent: {core.AUTOMATION_KINDS[self.kind][0]}\n'
             f'Channel: <#{self.channel_id}>\n'
-            f'Enabled: {status}\n\n'
+            f'Enabled: {status}\n'
+            f'Ping @GuildBlast: {ping}\n\n'
             'No message will be sent until its event happens.',
             embed=core.embed(discord.utils.escape_mentions(self.heading.value),
                              discord.utils.escape_mentions(self.intro.value) or
                              "(Event-specific information is added automatically.)"),
             view=ConfirmAutomation(self.owner,self.kind,self.channel_id,
-                                  self.heading.value,self.intro.value,status=="yes"),
+                                  self.heading.value,self.intro.value,
+                                  status=="yes",ping=="yes"),
             ephemeral=True,allowed_mentions=discord.AllowedMentions.none())
 
 
 class ConfirmAutomation(Private):
-    def __init__(self,owner,kind,channel,title,intro,enabled):
+    def __init__(self,owner,kind,channel,title,intro,enabled,ping=False):
         super().__init__(owner)
         self.kind,self.channel,self.title,self.intro,self.enabled=kind,channel,title,intro,enabled
+        self.ping=ping
         self.used=False
 
     @discord.ui.button(label="Save Automation",emoji="✅",style=discord.ButtonStyle.success)
@@ -313,14 +322,16 @@ class ConfirmAutomation(Private):
             return await interaction.response.send_message("Already processed.",ephemeral=True)
         self.used=True
         try:
-            core.check_channel(interaction.guild,self.channel)
+            core.check_channel(interaction.guild,self.channel,ping=self.ping)
             core.save_automation(self.kind,self.channel,self.title,self.intro,
-                                 self.enabled,interaction.user.id)
+                                 self.enabled,interaction.user.id,
+                                 ping_guildblast=self.ping)
         except ValueError as exc:
             return await interaction.response.edit_message(
                 content="⚠️ "+str(exc),view=None,embed=None)
         api.admin_hub.audit(interaction.user.id,"scheduler_automation_saved",
-                            f'{self.kind}, channel {self.channel}, enabled {self.enabled}')
+                            f'{self.kind}, channel {self.channel}, enabled {self.enabled}, '
+                            f'GuildBlast ping {self.ping}')
         await interaction.response.edit_message(
             content="✅ Automation saved.\n\n"+automation_detail(self.kind),
             view=None,embed=None,allowed_mentions=discord.AllowedMentions.none())
