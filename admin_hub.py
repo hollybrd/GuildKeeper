@@ -2,6 +2,14 @@
 
 Installed by bot.py, which provides the existing XP/quest/reward functions.
 No legacy admin slash commands are replaced.
+
+
+READING GUIDE
+-------------
+This module builds the *staff-facing* Discord interface. Its buttons do not
+perform business logic by themselves; they call functions in bot.py and helper
+modules. Every sensitive panel checks Manage Server permissions, and private
+submenus additionally check which moderator opened them.
 """
 import discord
 import panel_health
@@ -13,12 +21,14 @@ from discord import app_commands
 api = None
 
 
+# Every Admin Hub interaction must come from this server and a moderator with Manage Server.
 def allowed(interaction):
     return (interaction.guild_id == api.GUILD_ID
             and isinstance(interaction.user, discord.Member)
             and interaction.user.guild_permissions.manage_guild)
 
 
+# Store who performed an action, who was affected, and what changed in SQLite.
 def audit(actor, action, detail, target=None):
     with api.connect() as db:
         db.execute(
@@ -27,6 +37,7 @@ def audit(actor, action, detail, target=None):
             (api.GUILD_ID, actor, target, action, detail, api.utc_now().isoformat()))
 
 
+# Base class for menus that only the moderator who opened them can operate.
 class PrivateMenu(discord.ui.View):
     def __init__(self, owner_id):
         super().__init__(timeout=300)
@@ -39,6 +50,7 @@ class PrivateMenu(discord.ui.View):
         return True
 
 
+# Permanent entry-point buttons; unlike private menus this view survives bot restarts.
 class AdminHubView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -113,6 +125,7 @@ def hub_embed():
     return embed
 
 
+# Discord's built-in member picker, used instead of asking admins for numeric user IDs.
 class MemberSelector(discord.ui.UserSelect):
     def __init__(self):
         super().__init__(placeholder='Choose the member to manage', min_values=1, max_values=1)
@@ -174,6 +187,7 @@ class PlayerMenu(PrivateMenu):
             content='👥 Select another member.', view=PlayerPickerView(self.owner_id))
 
 
+# Ask for an XP adjustment and explanation before showing the impact preview.
 class XPForm(discord.ui.Modal):
     def __init__(self, owner_id, target_id, sign):
         super().__init__(title='Award XP' if sign > 0 else 'Remove XP', timeout=300)
@@ -210,6 +224,7 @@ class XPForm(discord.ui.Modal):
             ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
+# Apply the XP change only after a second click, checking the old balance first.
 class ConfirmXP(PrivateMenu):
     def __init__(self, owner_id, target_id, amount, reason, expected_xp=None):
         super().__init__(owner_id)
@@ -272,6 +287,7 @@ class RewardMenu(PrivateMenu):
         await interaction.response.edit_message(content=reward_summary(), view=self)
 
 
+# Entrypoint for scheduled announcements and immediate, one-off posts.
 class AnnouncementMenu(PrivateMenu):
     @discord.ui.button(label='Schedule Message', emoji='📅', style=discord.ButtonStyle.primary)
     async def schedule(self, interaction, button):
@@ -387,6 +403,7 @@ def audit_summary(category='all'):
     return '\n'.join(lines)[:1900]
 
 
+# Filter recent admin activity by category without exposing it to normal members.
 class AuditMenu(PrivateMenu):
     def __init__(self, owner_id):
         super().__init__(owner_id)
@@ -437,6 +454,7 @@ def health_summary(guild):
     return '\n'.join(lines)
 
 
+# Maintenance actions: synchronize roles, refresh panels, and configure the shop.
 class ControlMenu(PrivateMenu):
     @discord.ui.button(label='Shopify Store', emoji='🛍️', style=discord.ButtonStyle.secondary, row=1)
     async def shopify(self, interaction, button):
@@ -519,6 +537,7 @@ class ShopChannelMenu(PrivateMenu):
         self.add_item(ShopChannelSelect())
 
 
+# Set up or refresh the permanent Discord shop; credentials are configured elsewhere.
 class ShopifyMenu(PrivateMenu):
     @discord.ui.button(label='Post / Move Shop',emoji='🛍️',style=discord.ButtonStyle.primary)
     async def post(self,interaction,button):
@@ -567,6 +586,7 @@ class HealthCheckMenu(PrivateMenu):
             ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
+# Show which permanent Discord messages are missing or stale and offer repair.
 class PanelHealthMenu(PrivateMenu):
     @discord.ui.button(label='Check Again', emoji='🔍', style=discord.ButtonStyle.secondary)
     async def refresh(self, interaction, button):
@@ -647,6 +667,7 @@ class ConfirmRankSync(PrivateMenu):
         await interaction.response.edit_message(content='Rank sync cancelled.', view=None)
 
 
+# Update the saved Admin Hub message in place so multiple copies do not accumulate.
 async def post_admin_hub(channel: discord.TextChannel):
     """Create or relocate the Admin Hub to any private Guild text channel."""
     guild = api.bot.get_guild(api.GUILD_ID)
@@ -705,6 +726,7 @@ async def post_admin_hub(channel: discord.TextChannel):
     return True, 'Admin Hub ready in ' + channel.mention + '.' + note
 
 
+# Called once from bot.py to register the staff slash command and view.
 def install(bot_module):
     """Register the panel, slash entry point, and persistent buttons."""
     global api
