@@ -238,7 +238,7 @@ def bot_dm_preference_text(enabled: bool) -> str:
     if enabled:
         return (
             '🔔 **Bot DMs are ON.** GuildKeeper can privately remind you before '
-            'your weekly streak is at risk or you could lose inactivity XP.\\n\\n'
+            'your weekly streak is at risk or you could lose inactivity XP.\n\n'
             'To switch them off, open the **Player Hub → Bot DMs → Turn Off**.'
         )
     return (
@@ -646,10 +646,35 @@ async def admin_spawnpoint_test(interaction: discord.Interaction, member: discor
     )
 
 
+def guildkeeper_welcome_dm() -> str:
+    """One short onboarding DM; never gate access on Discord DM permissions."""
+    start_here = f'<#{STARTER_CHANNEL_ID}>' if STARTER_CHANNEL_ID else '#start-here'
+    return (
+        '🛡️ **Welcome to GYMGUILD!** ✦\n'
+        f'Head to {start_here} and complete your **Starter Quest** to unlock '
+        'all Guild channels.\n\n'
+        'GuildKeeper reminders are on by default. After completing the Starter Quest, '
+        'you can switch them off in **Player Hub → Bot DMs → Turn Off**.'
+    )
+
+
+async def send_guildkeeper_welcome_dm(member: discord.Member) -> bool:
+    """Welcome new members once per join, without interrupting the public welcome."""
+    if member.bot or member.guild.id != GUILD_ID or not bot_dm_enabled(member.guild.id, member.id):
+        return False
+    try:
+        await member.send(guildkeeper_welcome_dm())
+        return True
+    except (discord.Forbidden, discord.HTTPException):
+        log.info('Welcome DM unavailable for user %s', member.id)
+        return False
+
+
 @bot.event
 async def on_member_join(member: discord.Member):
     if member.guild.id == GUILD_ID and not member.bot:
         await send_spawnpoint_welcome(member)
+        await send_guildkeeper_welcome_dm(member)
         await update_rank(member, get_xp(member.guild.id, member.id), announce=False)
         current_roles = {r.id for r in member.roles}
         if GYM_ROLE_IDS and current_roles & GYM_ROLE_IDS:
@@ -3812,21 +3837,21 @@ def bot_dm_reminder_kind(now: datetime | None = None) -> str | None:
 def bot_dm_reminder_message(kind: str, streak: int, objectives: int) -> str:
     if kind == 'streak':
         return (
-            '🔥 **Your GYMGUILD streak is at risk!**\\n'
+            '🔥 **Your GYMGUILD streak is at risk!**\n'
             f'You currently have a **{streak}-week streak**, but this week’s '
             f'Side Quest is only **{objectives}/4 complete**. The next quest '
             'reset is **Monday at 00:00 UK time**. Complete all four objectives '
-            'before then or activate an available pause to protect your streak.\\n\\n'
+            'before then or activate an available pause to protect your streak.\n\n'
             + BOT_DM_FOOTER
         )
     if kind == 'xp':
         return (
-            '⚠️ **GYMGUILD XP reminder**\\n'
+            '⚠️ **GYMGUILD XP reminder**\n'
             'You have **0/4 Weekly Side Quest objectives** recorded this week. '
             'At the **Monday 00:00 UK reset**, an unpaused week with zero '
             'qualifying objectives incurs a **25 XP inactivity deduction** '
             '(your total cannot drop below 0). Completing **any one** qualifying '
-            'objective or activating a pause avoids that deduction.\\n\\n'
+            'objective or activating a pause avoids that deduction.\n\n'
             + BOT_DM_FOOTER
         )
     raise ValueError('Unsupported reminder kind')
