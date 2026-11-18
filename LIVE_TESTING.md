@@ -1,4 +1,4 @@
-# GuildKeeper live testing — operator guide
+# GuildKeeper live testing  -  operator guide
 
 **Purpose:** Validate the real Discord experience using a separate, ordinary Discord account. The Test Runner does not impersonate that account, send messages as it, award XP, or automatically mark tests passed. It reads GuildKeeper records and saves moderator-observed pass/fail decisions.
 

@@ -350,7 +350,7 @@ async def run_automatic(now=None):
         last_start=(last_end-timedelta(days=1)).replace(day=1)
         rows=monthly_top_10(api.GUILD_ID,last_start.astimezone(timezone.utc),
                             last_end.astimezone(timezone.utc))
-        lines=[f"**#{i}** <@{uid}> — **{xp:,} XP**" for i,(uid,xp) in enumerate(rows,1)]
+        lines=[f"**#{i}** <@{uid}>  -  **{xp:,} XP**" for i,(uid,xp) in enumerate(rows,1)]
         content=("Top XP earned last month:\n"+"\n".join(lines) if lines else
                  "No positive XP gains were recorded last month.")
         content+="\n\n**Lifetime XP and ranks do not reset.**"

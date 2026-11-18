@@ -91,7 +91,7 @@ async def issue_or_deliver(api,interaction,ticket_id):
     channel=interaction.channel
     try:
         await channel.send(
-            f"🎟️ **GYMGUILD {ticket['rank']} Reward — {api.REWARD_RANKS[ticket['rank']]}% off**\n"
+            f"🎟️ **GYMGUILD {ticket['rank']} Reward  -  {api.REWARD_RANKS[ticket['rank']]}% off**\n"
             f"Your single-use Shopify code: **\`{code}\`**\n"
             "Use it at https://gymguild.co.uk during checkout. "
             "**Valid for 7 days after creation**, one order only. "
@@ -174,7 +174,7 @@ async def request_code(api,interaction):
     await interaction.response.send_message(
         f"🎟️ **Issue Shopify Reward Code?**\n"
         f"Ticket: **#{ticket['id']}** · Member: <@{ticket['user_id']}>\n"
-        f"Reward: **{ticket['rank']} — {percentage}% off**\n"
+        f"Reward: **{ticket['rank']}  -  {percentage}% off**\n"
         "Shopify will create a **single-use**, **7-day** discount for the store. "
         "It will be posted privately in this ticket, logged, and marked fulfilled "
         "only after delivery.\n"

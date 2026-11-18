@@ -69,7 +69,7 @@ def check_runtime(api, guild):
     if isinstance(latency, (float, int)) and 0 <= latency < float('inf'):
         if latency > 2:
             checks.append(status('Gateway latency', 'warning',
-                                 f'{latency * 1000:.0f} ms — elevated'))
+                                 f'{latency * 1000:.0f} ms  -  elevated'))
         else:
             checks.append(status('Gateway latency', 'current', f'{latency * 1000:.0f} ms'))
     else:
@@ -239,7 +239,7 @@ def render(report):
         'attention': '⚠️ GuildKeeper needs attention',
     }[flag]
     embed = discord.Embed(
-        title='✦ GUILDKEEPER — HEALTH CHECK',
+        title='✦ GUILDKEEPER  -  HEALTH CHECK',
         description=(header + '\nPoint-in-time diagnostics. A successful check cannot prove '
                      'that every command, DM, reward, or future scheduled job will succeed.'),
         colour=(discord.Colour.green() if flag == 'healthy'
@@ -249,7 +249,7 @@ def render(report):
     panel_symbols = {'current': '✅', 'outdated': '🟠', 'missing': '❌',
                      'setup': '⚠️', 'unknown': '❔'}
     panel_lines = [f'{panel_symbols.get(item["state"], "❔")} '
-                   f'**{item["name"]}** — {item["detail"]}' for item in panels]
+                   f'**{item["name"]}**  -  {item["detail"]}' for item in panels]
     embed.add_field(name=f'Permanent panels ({sum(p["state"] == "current" for p in panels)}/{len(panels)} current)',
                     value='\n'.join(panel_lines)[:1024] or 'No panels could be inspected',
                     inline=False)

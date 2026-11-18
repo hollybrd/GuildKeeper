@@ -86,7 +86,7 @@ def progress_text(gid, uid, *, detailed=True):
     counts = {state: sum(x['status'] == state for x in records.values()) for state in STATUS}
     pending = len(TEST_CASES) - len(records)
     lines = [
-        f'🧪 **GUILDKEEPER — LIVE TEST RUNNER**',
+        f'🧪 **GUILDKEEPER  -  LIVE TEST RUNNER**',
         f'Test member: <@{uid}> · **{counts["passed"]}/{len(TEST_CASES)} passed** · '
         f'❌ {counts["failed"]} failed · ⏭️ {counts["skipped"]} skipped · ⬜ {pending} untested',
         'These outcomes are **manually recorded by staff**, not automatically verified.',
@@ -153,7 +153,7 @@ def snapshot(gid, uid):
 def snapshot_embed(gid, uid):
     info = snapshot(gid, uid)
     e = discord.Embed(
-        title='🧪 Test Member — Read-Only Diagnostics',
+        title='🧪 Test Member  -  Read-Only Diagnostics',
         description=f'<@{uid}> · GuildKeeper database state (not a simulated test pass)',
         colour=0x71A7A2)
     e.add_field(name='XP / Streak', value=f'{info["xp"]} XP · {info["streak"]} weeks', inline=True)
@@ -266,7 +266,7 @@ class ScenarioSelect(discord.ui.Select):
             return await interaction.response.send_message('Invalid scenario.', ephemeral=True)
         title, instructions = next((name, desc) for x, name, desc in TEST_CASES if x == key)
         previous = results(interaction.guild_id, view.tester_id).get(key)
-        history = (f'\nPrevious result: {previous["status"]} — {previous["note"]}' if previous else '')
+        history = (f'\nPrevious result: {previous["status"]}  -  {previous["note"]}' if previous else '')
         await interaction.response.send_message(
             f'🧪 **{title}**\nTester: <@{view.tester_id}>\n\n'
             + instructions + history

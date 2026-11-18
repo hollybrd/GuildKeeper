@@ -41,7 +41,7 @@ def when_label(row):
 
 def summary(row):
     ping = "GuildBlast ping" if row["ping_guildblast"] else "no ping"
-    return (f'**#{row["id"]} — {discord.utils.escape_markdown(row["title"])}**\n'
+    return (f'**#{row["id"]}  -  {discord.utils.escape_markdown(row["title"])}**\n'
             f'<#{row["channel_id"]}> · {row["recurrence"].title()} · '
             f'{when_label(row)} · {ping} · **{row["status"]}**')
 
@@ -53,7 +53,7 @@ def listing():
         return "📆 **Scheduled Announcements**\nNo scheduled announcements yet."
     active = next((r for r in rows if r["status"] == "active"), None)
     lines = ["📆 **Scheduled Announcements**",
-             "**Next post:** "+when_label(active) + f' — {active["title"]}' if active else
+             "**Next post:** "+when_label(active) + f'  -  {active["title"]}' if active else
              "**Next post:** None scheduled", ""]
     for row in rows:
         lines.append(summary(row))
@@ -303,9 +303,9 @@ class ConfirmChange(Private):
 # Explain automatic weekly and monthly notices, which do not reset player XP.
 def automatic_summary():
     return ('📢 **Automatic notices**\n\n'
-            '**Weekly Side Quest refresh** — posted once each week after the new quest board '
+            '**Weekly Side Quest refresh**  -  posted once each week after the new quest board '
             'has been published, in the configured announcements channel.\n\n'
-            '**Monthly leaderboard recap** — posted on the first day of each UK month, '
+            '**Monthly leaderboard recap**  -  posted on the first day of each UK month, '
             'showing the top XP gained during the previous month. '
             '**Lifetime XP and ranks never reset.**\n\n'
             'Automatic notices never ping @everyone or GuildBlast. '

@@ -1,4 +1,4 @@
-# GuildKeeper deployment — manual trigger only. This workflow updates the Oracle server.
+# GuildKeeper deployment  -  manual trigger only. This workflow updates the Oracle server.
 # Important: changing GitHub code by itself does NOT redeploy the running Discord bot.
 # The process below preserves the real player database and rolls back on failure.
 
