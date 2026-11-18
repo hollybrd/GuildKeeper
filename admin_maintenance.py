@@ -1,0 +1,90 @@
+"""Safe startup reconciliation for GuildKeeper's permanent Discord panels.
+
+Never auto-publishes a panel without a known configured channel/location.
+Unknown or inaccessible messages are not replaced, to avoid duplicates.
+All decisions are recorded for the private Admin Hub Health Check.
+"""
+import json
+import logging
+
+import panel_health
+
+log = logging.getLogger('guildkeeper.maintenance')
+
+
+def _record(api, data):
+    with api.connect() as db:
+        db.execute('INSERT OR REPLACE INTO v12_config(key,value) VALUES (?,?)',
+                   (f'automatic-maintenance-{api.GUILD_ID}', json.dumps(data)))
+
+
+def last_report(api):
+    with api.connect() as db:
+        row = db.execute('SELECT value FROM v12_config WHERE key=?',
+                         (f'automatic-maintenance-{api.GUILD_ID}',)).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row['value'])
+    except (ValueError, TypeError):
+        return None
+
+
+async def reconcile(api, guild):
+    """Check live message embeds/buttons and repair verifiably stale/missing panels."""
+    timestamp = api.utc_now().isoformat()
+    try:
+        before = await panel_health.snapshot(api, guild)
+    except Exception as exc:
+        log.exception('Startup panel scan failed')
+        report = {'timestamp': timestamp, 'attempted': 0, 'updated': 0,
+                  'errors': ['Panel scan failed: ' + type(exc).__name__],
+                  'remaining': ['Unverified (scan failed)']}
+        _record(api, report)
+        return report
+
+    # Only repair panels with an existing known destination; a new Admin Hub,
+    # Testing Cheats, and Milestone board need moderator-chosen locations.
+    known = []
+    skipped = []
+    for item in before:
+        if item['state'] not in ('missing', 'outdated'):
+            continue
+        if item['name'] in ('Admin Hub', 'Testing Cheats', 'Milestone Quests') and not item['url']:
+            key = {
+                'Admin Hub': f'admin-hub-post-{guild.id}',
+                'Testing Cheats': f'testing-panel-post-{guild.id}',
+                'Milestone Quests': f'milestone-board-{guild.id}',
+            }[item['name']]
+            if not panel_health._saved_config(api, key):
+                skipped.append(item['name'] + ': no saved location')
+                continue
+        known.append(item)
+
+    results = []
+    if known:
+        try:
+            results = await panel_health.repair(api, guild, known)
+        except Exception as exc:
+            log.exception('Startup panel repair failed')
+            results = [(False, 'Panel repair stopped: ' + type(exc).__name__)]
+
+    try:
+        after = await panel_health.snapshot(api, guild)
+        remaining = [entry['name'] + ': ' + entry['state']
+                     for entry in after if entry['state'] != 'current']
+    except Exception as exc:
+        log.exception('Startup panel recheck failed')
+        remaining = ['Panel recheck failed: ' + type(exc).__name__]
+
+    report = {
+        'timestamp': timestamp,
+        'attempted': len(results),
+        'updated': sum(bool(ok) for ok, _ in results),
+        'errors': [msg for ok, msg in results if not ok] + skipped,
+        'remaining': remaining,
+    }
+    _record(api, report)
+    log.info('Startup panel maintenance: %s updated/%s attempts; %s unresolved',
+             report['updated'], report['attempted'], len(remaining))
+    return report
