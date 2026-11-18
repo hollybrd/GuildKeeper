@@ -32,6 +32,8 @@ async def issue_or_deliver(api,interaction,ticket_id):
         saved=db.execute("SELECT * FROM shopify_reward_codes WHERE guild_id=? AND reward_id=?",
                          (api.GUILD_ID,ticket_id)).fetchone()
         if saved is None:
+            if ticket["status"]!="open":
+                return "⚠️ This ticket was already fulfilled or closed; no new code was created."
             if not shopify.admin_configured():
                 return "⚠️ Shopify API credentials are not configured. No code was created."
             code=shopify.new_code(ticket["rank"],ticket_id)
@@ -144,6 +146,10 @@ async def request_code(api,interaction):
     if ticket is None or ticket["status"]=="closed":
         return await interaction.response.send_message(
             "No eligible open reward ticket was found here.",ephemeral=True)
+    if ticket["status"]!="open" and get_ticket_code(api,ticket["id"]) is None:
+        return await interaction.response.send_message(
+            "This reward was already fulfilled by a moderator; a second code cannot be issued.",
+            ephemeral=True)
     if not shopify.admin_configured():
         return await interaction.response.send_message(
             "⚠️ Shopify Admin API isn't configured. No discount can be issued yet. "
