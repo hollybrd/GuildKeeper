@@ -838,11 +838,32 @@ async def profile(interaction: discord.Interaction):
     streak_notice = streak_blocked_rank_notice(interaction.guild_id, interaction.user.id, xp)
     await reply(interaction, f'✦ **{interaction.user.display_name}**\nRank: **{rank_for(xp, interaction.guild_id, interaction.user.id)}**\nXP: **{xp}**\nLifetime objectives completed: **{lifetime_objectives(interaction.guild_id, interaction.user.id)}**\nLongest streak: **{longest_streak(interaction.guild_id, interaction.user.id)} weeks**\n\n**Rewards**\n{reward_eligibility_text(interaction.guild_id, interaction.user.id)}\n{upcoming}' + ('\n\n' + streak_notice if streak_notice else '') + '\n\n🎟️ To request an unlocked rank reward, visit **#stats-and-streaks** and press **Claim Reward** in the Player Hub.')
 
+class RankProfileButtonView(discord.ui.View):
+    """Owner-only shortcut from /ranks to the member's live profile."""
+    def __init__(self, user_id: int):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message('This rank panel belongs to another member.', ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='View Rank', emoji='👤', style=discord.ButtonStyle.primary)
+    async def view_rank(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not only_guild(interaction):
+            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
+        await interaction.response.send_message(
+            profile_progress_text(interaction.guild_id, interaction.user.id, interaction.user.display_name),
+            ephemeral=True)
+
+
 @bot.tree.command(name='ranks', description='See Guild XP milestones')
 async def ranks(interaction: discord.Interaction):
     xp = get_xp(interaction.guild_id, interaction.user.id)
     streak_notice = streak_blocked_rank_notice(interaction.guild_id, interaction.user.id, xp)
-    await reply(interaction, '**GYMGUILD RANKS**\n'+'\n'.join(f'✦ **{name}** — {threshold:,} XP' + (f' + {STREAK_REQUIREMENTS[name]}-week **active** streak to unlock' if name in STREAK_REQUIREMENTS else '') for name,threshold in RANKS) + '\n\n**Rank rules:** Streaks must be active when unlocking Master, Legend or Paragon. Once unlocked, breaking your streak will not demote you; losing XP below a rank threshold can. Regaining XP restores previously unlocked ranks without repeating the streak.\n**Rewards:** Master (10%), Legend (15%) and Paragon (20%) are unlocked permanently when their rank requirements are first met. Each reward can be claimed **once**, even after an XP demotion. Paused weeks preserve streaks but do not increase them.' + ('\n\n' + streak_notice if streak_notice else ''))
+    await interaction.response.send_message( '**GYMGUILD RANKS**\n'+'\n'.join(f'✦ **{name}** — {threshold:,} XP' + (f' + {STREAK_REQUIREMENTS[name]}-week **active** streak to unlock' if name in STREAK_REQUIREMENTS else '') for name,threshold in RANKS) + '\n\n**Rank rules:** Streaks must be active when unlocking Master, Legend or Paragon. Once unlocked, breaking your streak will not demote you; losing XP below a rank threshold can. Regaining XP restores previously unlocked ranks without repeating the streak.\n**Rewards:** Master (10%), Legend (15%) and Paragon (20%) are unlocked permanently when their rank requirements are first met. Each reward can be claimed **once**, even after an XP demotion. Paused weeks preserve streaks but do not increase them.' + ('\n\n' + streak_notice if streak_notice else ''), view=RankProfileButtonView(interaction.user.id), ephemeral=True)
 
 
 
@@ -3464,8 +3485,11 @@ class PlayerStatsView(discord.ui.View):
     @discord.ui.button(label='Ranks', emoji='🏆', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:stats:ranks')
     async def ranks_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID:
+            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
         await interaction.response.send_message(
-            **private_progress_content('ranks', interaction), ephemeral=True)
+            profile_progress_text(interaction.guild_id, interaction.user.id, interaction.user.display_name),
+            ephemeral=True)
 
     @discord.ui.button(label='Activate Pause', emoji='⏸️', style=discord.ButtonStyle.primary,
                        custom_id='guildkeeper:stats:activate_pause', row=1)
