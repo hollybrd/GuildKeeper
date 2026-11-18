@@ -1,6 +1,7 @@
 """Order XP panel storage and moderator review regression tests."""
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 
 import bot
