@@ -456,33 +456,62 @@ class ConfirmRankSync(PrivateMenu):
         await interaction.response.edit_message(content='Rank sync cancelled.', view=None)
 
 
-async def post_admin_hub():
+async def post_admin_hub(channel: discord.TextChannel):
+    """Create or relocate the Admin Hub to any private Guild text channel."""
     guild = api.bot.get_guild(api.GUILD_ID)
-    channel = guild.get_channel(api.MOD_REVIEW_CHANNEL_ID) if guild and api.MOD_REVIEW_CHANNEL_ID else None
-    if not isinstance(channel, discord.TextChannel):
-        return False, 'MOD_REVIEW_CHANNEL_ID must be a private text channel.'
+    if guild is None or not isinstance(channel, discord.TextChannel) or channel.guild.id != api.GUILD_ID:
+        return False, 'Select a text channel inside the configured GYMGUILD server.'
     if channel.permissions_for(guild.default_role).view_channel:
-        return False, 'Hide the moderator channel from @everyone before posting the Admin Hub.'
+        return False, 'The selected channel is visible to @everyone. Make it private before posting the Admin Hub.'
+    me = guild.me
+    if me is None:
+        return False, 'GuildKeeper could not check its permissions for that channel.'
+    perms = channel.permissions_for(me)
+    if not (perms.view_channel and perms.send_messages and perms.embed_links and perms.read_message_history):
+        return False, 'GuildKeeper needs View Channel, Send Messages, Embed Links and Read Message History in this channel.'
+
     key = 'admin-hub-post-' + str(api.GUILD_ID)
     with api.connect() as db:
         row = db.execute('SELECT value FROM v12_config WHERE key=?', (key,)).fetchone()
-    message = None
+
+    previous = None
+    previous_channel = None
     if row:
         try:
-            message = await channel.fetch_message(int(row['value']))
+            saved = row['value'].split(':')
+            if len(saved) == 2:
+                old_channel_id, old_message_id = map(int, saved)
+                previous_channel = guild.get_channel(old_channel_id)
+            else:
+                # Backward compatibility with the earlier single-message-ID format.
+                old_message_id = int(saved[0])
+                previous_channel = guild.get_channel(api.MOD_REVIEW_CHANNEL_ID)
+            if isinstance(previous_channel, discord.TextChannel):
+                previous = await previous_channel.fetch_message(old_message_id)
         except (ValueError, discord.NotFound, discord.Forbidden, discord.HTTPException):
-            pass
+            previous = None
+
     try:
-        if message is None:
+        if previous is not None and previous_channel.id == channel.id:
+            await previous.edit(embed=hub_embed(), view=AdminHubView())
+            message = previous
+        else:
             message = await channel.send(embed=hub_embed(), view=AdminHubView(),
                                          allowed_mentions=discord.AllowedMentions.none())
-        else:
-            await message.edit(embed=hub_embed(), view=AdminHubView())
     except (discord.Forbidden, discord.HTTPException):
-        return False, 'Cannot post Admin Hub. Check bot permissions.'
+        return False, 'Unable to post in the selected channel. Please check bot permissions.'
+
     with api.connect() as db:
-        db.execute('INSERT OR REPLACE INTO v12_config(key,value) VALUES (?,?)', (key, str(message.id)))
-    return True, 'Admin Hub ready in ' + channel.mention
+        db.execute('INSERT OR REPLACE INTO v12_config(key,value) VALUES (?,?)',
+                   (key, str(channel.id) + ':' + str(message.id)))
+
+    note = ''
+    if previous is not None and previous_channel.id != channel.id:
+        try:
+            await previous.delete()
+        except (discord.Forbidden, discord.HTTPException):
+            note = ' ⚠️ The old Admin Hub could not be deleted. Remove the previous message manually.'
+    return True, 'Admin Hub ready in ' + channel.mention + '.' + note
 
 
 def install(bot_module):
@@ -493,9 +522,10 @@ def install(bot_module):
     @api.bot.tree.command(name='admin_hub_post', description='Post or refresh the private moderator Admin Hub')
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def admin_hub_post(interaction: discord.Interaction):
+    @app_commands.describe(channel='Private text channel where the Admin Hub should appear')
+    async def admin_hub_post(interaction: discord.Interaction, channel: discord.TextChannel):
         if not allowed(interaction):
             return await interaction.response.send_message('Manage Server permission required.', ephemeral=True)
         await interaction.response.defer(ephemeral=True)
-        ok, result = await post_admin_hub()
+        ok, result = await post_admin_hub(channel)
         await interaction.followup.send(('✅ ' if ok else '⚠️ ') + result, ephemeral=True)
