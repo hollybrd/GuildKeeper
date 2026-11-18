@@ -1,4 +1,12 @@
-"""Regression tests for the private GuildKeeper Admin Hub."""
+"""Regression tests for the private GuildKeeper Admin Hub.
+
+READING GUIDE
+-------------
+Checks that admin-only buttons require permissions, that destructive actions show confirmations, that audit entries persist, and that panel repair and startup health behave safely.
+
+Each setUp() uses a temporary SQLite database rather than GuildKeeper's
+real player database. Assertions compare actual results with expected rules.
+"""
 import tempfile
 import unittest
 from pathlib import Path

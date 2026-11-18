@@ -1,4 +1,12 @@
-"""Private GuildKeeper inbox and DM preference regression tests."""
+"""Private GuildKeeper inbox and DM preference regression tests.
+
+READING GUIDE
+-------------
+Uses a temporary database to verify private Inbox records, DM opt-out rules, pause notices and one-time streak warnings; no actual DM is sent.
+
+Each setUp() uses a temporary SQLite database rather than GuildKeeper's
+real player database. Assertions compare actual results with expected rules.
+"""
 import tempfile
 import unittest
 from pathlib import Path

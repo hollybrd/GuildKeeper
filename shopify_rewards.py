@@ -1,4 +1,12 @@
-"""Staff-confirmed, single-use Shopify reward codes for private GuildKeeper tickets."""
+"""Staff-confirmed, single-use Shopify reward codes for private GuildKeeper tickets.
+
+READING GUIDE
+-------------
+This module is the safety boundary between Discord reward tickets and live
+Shopify discounts. A moderator confirms issuance; the bot first reserves a code
+in SQLite, creates it once in Shopify, then posts it only to the private ticket.
+An interrupted API response is NOT retried automatically to avoid duplicate codes.
+"""
 import sqlite3
 
 import discord
@@ -6,12 +14,14 @@ import discord
 import shopify_client as shopify
 
 
+# Only server moderators with Manage Server may issue these live rewards.
 def permitted(api,interaction):
     return (interaction.guild_id==api.GUILD_ID and
             isinstance(interaction.user,discord.Member) and
             interaction.user.guild_permissions.manage_guild)
 
 
+# A previously reserved or delivered code belongs to one specific ticket.
 def get_ticket_code(api,ticket_id):
     with api.connect() as db:
         return db.execute(
@@ -19,6 +29,7 @@ def get_ticket_code(api,ticket_id):
             (api.GUILD_ID,ticket_id)).fetchone()
 
 
+# Reservation -> Shopify creation -> private delivery -> ticket fulfilment, with no blind retry.
 async def issue_or_deliver(api,interaction,ticket_id):
     """Never rerun an uncertain create; never mint a second code for same ticket."""
     with api.connect() as db:
@@ -104,6 +115,7 @@ async def issue_or_deliver(api,interaction,ticket_id):
     return "✅ Single-use code created in Shopify and delivered to this private ticket."
 
 
+# A second click protects against accidentally issuing real discounts.
 class ConfirmShopifyReward(discord.ui.View):
     def __init__(self,api,moderator_id,ticket_id):
         super().__init__(timeout=180)
@@ -135,6 +147,7 @@ class ConfirmShopifyReward(discord.ui.View):
         await interaction.response.edit_message(content="No Shopify code created.",view=None)
 
 
+# Check ticket ownership, rank and credentials; show the moderator a confirmation.
 async def request_code(api,interaction):
     if not permitted(api,interaction):
         return await interaction.response.send_message(

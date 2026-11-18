@@ -1,4 +1,11 @@
-"""Permanent, private GuildKeeper testing shortcuts. Reuses existing commands."""
+"""Permanent, private GuildKeeper testing shortcuts. Reuses existing commands.
+
+READING GUIDE
+-------------
+These commands deliberately change REAL member records to test gameplay
+without waiting for multiple weeks. Only authorized moderators should use them.
+Member pickers, reason forms and confirmation screens help prevent mistakes.
+"""
 import discord
 import quest_testing
 import admin_action_safety
@@ -17,6 +24,7 @@ ACTIONS = {
 REWARD_RANKS = ('Master', 'Legend', 'Paragon')
 
 
+# Check Manage Server permissions before revealing testing shortcuts.
 def permitted(interaction):
     return (interaction.guild_id == api.GUILD_ID
             and isinstance(interaction.user, discord.Member)
@@ -28,6 +36,7 @@ async def denied(interaction):
         'Testing Cheats requires Manage Server permission in GYMGUILD.', ephemeral=True)
 
 
+# Make private confirmation menus usable only by the moderator who opened them.
 class Private(discord.ui.View):
     def __init__(self, owner_id):
         super().__init__(timeout=300)
@@ -40,6 +49,7 @@ class Private(discord.ui.View):
         return True
 
 
+# Permanent staff entry point for resets, XP, streak and quest testing.
 class TestingCheatsView(discord.ui.View):
     """Persistent entry point; user-specific actions remain private."""
     def __init__(self):
@@ -178,6 +188,7 @@ def embed():
     return e
 
 
+# Choose Weekly, Starter or Milestone quest testing.
 class QuestCategoryView(Private):
     def __init__(self, owner_id, target_id):
         super().__init__(owner_id)
@@ -196,6 +207,7 @@ class QuestCategoryView(Private):
             view=QuestObjectiveView(self.owner_id, self.target_id, category), ephemeral=True)
 
 
+# Choose one objective or all remaining; preview XP before changing anything.
 class QuestObjectiveSelect(discord.ui.Select):
     def __init__(self, category):
         choices = quest_testing.options(api, category)
@@ -243,6 +255,7 @@ class QuestObjectiveView(Private):
         self.add_item(QuestObjectiveSelect(category))
 
 
+# Run the synthetic quest completion only after moderator confirmation.
 class ConfirmQuestCompletion(Private):
     def __init__(self, owner_id, target_id, category, choice):
         super().__init__(owner_id)
@@ -280,6 +293,7 @@ class ConfirmQuestCompletion(Private):
 
 
 
+# Ask why the moderator is resetting progress, then show the exact impact.
 class ResetReasonForm(discord.ui.Modal):
     """Require a reason and show a precise reset preview."""
     def __init__(self, owner_id, target_id, action, rank=None):
@@ -312,6 +326,7 @@ class ResetReasonForm(discord.ui.Modal):
             ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
+# Select which streak-credit adjustment is needed.
 class StreakChoiceView(Private):
     @discord.ui.button(label='Add Streak Weeks', emoji='➕', style=discord.ButtonStyle.success)
     async def add(self, interaction, button):
@@ -375,6 +390,7 @@ class CheatUserSelect(discord.ui.UserSelect):
         await interaction.response.send_modal(
             ResetReasonForm(self.view.owner_id, member.id, self.action))
 
+# Choose which member's real records the cheat will modify.
 class CheatMemberPickerView(Private):
     def __init__(self, owner_id, action):
         super().__init__(owner_id)
@@ -427,6 +443,7 @@ class RewardRankPicker(Private):
         await interaction.response.send_modal(
             ResetReasonForm(self.owner_id, self.target_id, 'reward_reset', rank=rank))
 
+# Reuse the old slash-command logic rather than maintaining a second copy.
 async def run_existing_command(interaction, action, target_id, weeks=None, rank=None):
     """Run unchanged legacy command implementation; permissions checked first."""
     if action == 'milestone_reset':
@@ -482,6 +499,7 @@ async def run_existing_command(interaction, action, target_id, weeks=None, rank=
     await command.callback(*args)
 
 
+# Recheck that the preview is still accurate before deleting or resetting data.
 class ConfirmCheat(Private):
     def __init__(self, owner_id, target_id, action, weeks=None, rank=None,
                  reason=None, snapshot=None):
@@ -526,6 +544,7 @@ class ConfirmCheat(Private):
         await interaction.response.edit_message(content='Testing action cancelled.', view=None)
 
 
+# Keep one saved Testing Cheats message in the chosen private Discord channel.
 async def post_testing_panel(channel):
     guild = api.bot.get_guild(api.GUILD_ID)
     if guild is None or not isinstance(channel, discord.TextChannel) or channel.guild.id != api.GUILD_ID:
@@ -570,6 +589,7 @@ async def post_testing_panel(channel):
     return True, 'Testing Cheats ready in ' + channel.mention + '.' + warning
 
 
+# Register the permanent panel and legacy testing command entry points.
 def install(module):
     global api
     api = module

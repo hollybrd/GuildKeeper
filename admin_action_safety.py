@@ -1,8 +1,17 @@
-"""Read-only impact previews for testing and moderator reset confirmations."""
+"""Read-only impact previews for testing and moderator reset confirmations.
+
+READING GUIDE
+-------------
+When an admin requests a reset, first explain the exact records and expected
+XP changes without modifying anything. Return a stable snapshot as well as text.
+The confirmation view compares this snapshot again immediately before applying
+the reset, so an outdated preview cannot silently overwrite changed progress.
+"""
 
 WEEKLY_REWARDS = {'training1': 50, 'training2': 50, 'gym': 25, 'hobby': 25}
 
 
+# Return both human-readable impact text and a comparison key; never write to SQLite here.
 def impact(api, gid, uid, action, rank=None, weeks=None):
     """Return explanatory text and a stable snapshot of affected records.
 

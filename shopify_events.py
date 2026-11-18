@@ -2,6 +2,13 @@
 
 Default OFF. First poll establishes a baseline, so existing store inventory is
 not announced as a surprise new launch when the feature is enabled.
+
+
+READING GUIDE
+-------------
+Optional product-change monitoring. Disabled until the merchant explicitly
+sets SHOPIFY_AUTO_ANNOUNCE=1. The first scan records a baseline only, so
+existing products are not all incorrectly presented as new releases.
 """
 import json
 import os
@@ -15,10 +22,12 @@ import announcements_scheduler
 api=None
 
 
+# Check the store-owner opt-in flag from the server configuration.
 def enabled():
     return os.getenv("SHOPIFY_AUTO_ANNOUNCE","0").strip()=="1"
 
 
+# Create per-product snapshots used to compare successive catalog scans.
 def ensure_tables():
     with api.connect() as db:
         db.execute("""CREATE TABLE IF NOT EXISTS shopify_catalog_seen (
@@ -29,6 +38,7 @@ def ensure_tables():
         )""")
 
 
+# Avoid querying Shopify more frequently than the configured polling interval.
 def _last_poll():
     with api.connect() as db:
         row=db.execute("SELECT value FROM v12_config WHERE key=?",
@@ -36,6 +46,7 @@ def _last_poll():
     return row["value"] if row else None
 
 
+# Compare visible product snapshots and send at most a few new/sale notices.
 async def tick():
     if not enabled() or not api.ANNOUNCEMENTS_CHANNEL_ID:
         return
@@ -98,6 +109,7 @@ async def tick():
         api.log.warning("Detected %s Shopify product changes; announced at most 3",len(changes))
 
 
+# Initialize the module and its SQLite tables when GuildKeeper starts.
 def install(module):
     global api
     api=module

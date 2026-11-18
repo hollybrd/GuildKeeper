@@ -1,4 +1,12 @@
-"""Discord-facing GYMGUILD Shopify shop and safe order/reward workflows."""
+"""Discord-facing GYMGUILD Shopify shop and safe order/reward workflows.
+
+READING GUIDE
+-------------
+The player-facing Discord shop. Buttons open ephemeral product selectors and
+link users to Shopify for payment; no credit-card details enter GuildKeeper.
+The private order modal checks a Shopify order, then routes it to the existing
+moderator approval workflow without granting XP automatically.
+"""
 import sqlite3
 from datetime import datetime
 from urllib.parse import quote
@@ -11,6 +19,7 @@ import shopify_client as shopify
 api = None
 
 
+# Track which Shopify orders were checked so a single order cannot be reused across members.
 def ensure_tables():
     with api.connect() as db:
         db.execute("""CREATE TABLE IF NOT EXISTS shopify_order_verifications (
@@ -27,6 +36,7 @@ def ensure_tables():
         )""")
 
 
+# Build the public shop's main message, including its buttons and explanation.
 def shop_embed():
     e=discord.Embed(
         title="✦ GYMGUILD — THE GUILD SHOP",
@@ -43,6 +53,7 @@ def shop_embed():
     return e
 
 
+# Show a GBP price, adding the previous price when a sale is detected.
 def price_label(item):
     result=f'£{item["price"]:.2f}'
     if item["sale"] and item["compare_at"]:
@@ -50,6 +61,7 @@ def price_label(item):
     return result
 
 
+# Show one item's image/price and its official product page link.
 def product_embed(item):
     e=discord.Embed(title=item["title"],
         description=f'**{price_label(item)}**\n\n'
@@ -67,6 +79,7 @@ class ProductDetail(discord.ui.View):
         self.add_item(discord.ui.Button(label="View Product on Shopify",emoji="🛍️",url=url))
 
 
+# Allow the member to choose an item; the result is visible only to them.
 class ProductPick(discord.ui.Select):
     def __init__(self,items):
         super().__init__(placeholder="Choose a product",max_values=1,min_values=1,
@@ -88,6 +101,7 @@ class ProductMenu(discord.ui.View):
         self.add_item(ProductPick(items))
 
 
+# Fetch published products only when requested, avoiding stale hard-coded prices.
 async def browse(interaction,mode="all"):
     await interaction.response.defer(ephemeral=True,thinking=True)
     try:
@@ -111,6 +125,7 @@ async def browse(interaction,mode="all"):
         view=ProductMenu(items),ephemeral=True)
 
 
+# Permanent public buttons that survive GuildKeeper restarts.
 class ShopHub(discord.ui.View):
     """Persistent, public entry point. Private actions use ephemeral responses."""
     def __init__(self):
@@ -146,6 +161,7 @@ class ShopHub(discord.ui.View):
         await interaction.response.send_modal(VerifyOrderModal())
 
 
+# Private form for order number and checkout email; the email is not saved in SQLite.
 class VerifyOrderModal(discord.ui.Modal):
     def __init__(self):
         super().__init__(title="Verify GYMGUILD Order",timeout=300)
@@ -217,6 +233,7 @@ class VerifyOrderModal(discord.ui.Modal):
             ephemeral=True)
 
 
+# Edit or move the saved shop panel rather than leaving duplicate shops in Discord.
 async def post_shop_panel(channel):
     if not isinstance(channel,discord.TextChannel) or channel.guild.id!=api.GUILD_ID:
         return False,"Choose a GYMGUILD text channel."
@@ -260,6 +277,7 @@ async def post_shop_panel(channel):
     return True,"GYMGUILD Shop is ready in "+channel.mention
 
 
+# Connect the shop module to the main bot and register the moderator posting command.
 def install(module):
     global api
     api=module
