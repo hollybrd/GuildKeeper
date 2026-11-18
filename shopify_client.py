@@ -3,6 +3,14 @@
 Public shop browsing works without an admin token if the storefront publishes a
 products.json feed. Private order verification and discount creation require a
 separately configured limited-scope Shopify Admin app on Oracle.
+
+
+READING GUIDE
+-------------
+Low-level Shopify network access. Public products use the storefront's
+published product feed; private orders and discounts need a separate Shopify app.
+Client IDs and secrets come from the server environment, never from Discord input.
+This module does not approve purchase XP; a moderator still reviews that separately.
 """
 import os
 import re
@@ -45,12 +53,14 @@ def public_domain():
     return SHOP_URL
 
 
+# Detect whether the merchant supplied Shopify credentials, not whether Shopify accepted them.
 def admin_configured():
     return bool(os.getenv('SHOPIFY_ADMIN_DOMAIN') and (
         os.getenv('SHOPIFY_ADMIN_TOKEN') or (
             os.getenv('SHOPIFY_CLIENT_ID') and os.getenv('SHOPIFY_CLIENT_SECRET'))))
 
 
+# Only allow the configured myshopify.com host for private Admin GraphQL requests.
 def admin_endpoint():
     domain = os.getenv("SHOPIFY_ADMIN_DOMAIN", "").strip().lower()
     if not domain.endswith(".myshopify.com") or not SAFE_DOMAIN.fullmatch(domain):
@@ -66,6 +76,7 @@ _token = None
 _token_until = 0.0
 
 
+# Exchange client credentials for a short-lived Admin API token and cache it in memory.
 async def admin_token():
     global _token, _token_until
     legacy = os.getenv("SHOPIFY_ADMIN_TOKEN")
@@ -98,6 +109,7 @@ async def admin_token():
 
 
 
+# Fetch only public products and construct safe, official Shopify product links.
 async def catalog(limit=30):
     """Only online-visible public products, excluding placeholder Sample Product tags."""
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as session:
@@ -143,6 +155,7 @@ async def catalog(limit=30):
     return products
 
 
+# Send authenticated Shopify Admin API requests; never log or expose the access token.
 async def graphql(query,variables):
     url=admin_endpoint()
     token=await admin_token()
@@ -158,6 +171,7 @@ async def graphql(query,variables):
     return data.get("data") or {}
 
 
+# Compare the exact order number, checkout email and PAID/uncancelled status.
 async def verify_order(reference, email):
     """Check exact order name, purchaser email and fully paid status.
 
@@ -184,6 +198,7 @@ async def verify_order(reference, email):
             "fulfillment":order.get("displayFulfillmentStatus") or "UNKNOWN"}
 
 
+# Build strict one-use, seven-day discount settings from a known Guild rank.
 def discount_input(rank,ticket_id,code,now):
     percentages={"Master":10,"Legend":15,"Paragon":20}
     if rank not in percentages or ticket_id<1:
@@ -200,12 +215,14 @@ def discount_input(rank,ticket_id,code,now):
     }
 
 
+# Create a hard-to-guess code instead of using predictable user IDs alone.
 def new_code(rank,ticket_id):
     if rank not in {"Master","Legend","Paragon"}:
         raise ValueError("Invalid rank")
     return f"GG-{rank.upper()}-{ticket_id}-{secrets.token_hex(5).upper()}"
 
 
+# Ask Shopify to create a discount; return success only when Shopify confirms an ID.
 async def create_discount(rank,ticket_id,code,now):
     data=await graphql(CODE_MUTATION,{"input":discount_input(rank,ticket_id,code,now)})
     result=data.get("discountCodeBasicCreate") or {}
