@@ -1832,6 +1832,7 @@ async def post_purchase_review(guild: discord.Guild, user_id: int, order_id: int
 async def submit_order_from_interaction(interaction: discord.Interaction, reference: str) -> None:
     if interaction.guild_id != GUILD_ID or not isinstance(interaction.user, discord.Member):
         return await interaction.response.send_message('Use this in the GYMGUILD server.', ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
     status, order_id = submit_purchase_order(interaction.guild_id, interaction.user.id, reference)
     if status == 'submitted':
         notified = await post_purchase_review(interaction.guild, interaction.user.id, order_id)
@@ -1846,7 +1847,7 @@ async def submit_order_from_interaction(interaction: discord.Interaction, refere
         message = '❌ That order reference is already registered to another Guild member. Contact a moderator.'
     else:
         message = '❌ Enter a valid Shopify order reference (1–80 characters, no private details).'
-    await interaction.response.send_message(
+    await interaction.followup.send(
         message, embed=order_xp_embed(interaction.guild_id, interaction.user.id),
         view=OrderXPView(interaction.user.id), ephemeral=True,
     )
