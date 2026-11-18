@@ -3659,7 +3659,7 @@ class PlayerStatsView(discord.ui.View):
             embed=ranks_progress_embed(interaction.guild_id, interaction.user.id),
             view=RankProfileButtonView(interaction.user.id), ephemeral=True)
 
-    @discord.ui.button(label='Pauses', emoji='⏸️', style=discord.ButtonStyle.primary,
+    @discord.ui.button(label='Pauses', emoji='⏸️', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:stats:activate_pause', row=1)
     async def activate_pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.guild_id != GUILD_ID:
