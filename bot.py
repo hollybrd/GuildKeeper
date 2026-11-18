@@ -1798,8 +1798,8 @@ def order_xp_embed(gid: int, uid: int) -> discord.Embed:
     embed = discord.Embed(
         title='✦ GYMGUILD — ORDER XP',
         description=('Submit your GYMGUILD Shopify order number for moderator review. '
-                     f'Your **single lifetime Order XP request** can earn **{MILESTONE_XP["purchase1"]} XP** '
-                     'when approved. You cannot submit another request after a decision.'),
+                     f'Your **first approved order** can earn **{MILESTONE_XP["purchase1"]} XP** '
+                     'when approved. Rejected or cancelled requests can be retried until approved.'),
         colour=discord.Colour.from_rgb(104, 163, 153),
     )
     embed.add_field(name='✅ Approved orders', value=str(summary['approved']), inline=True)
@@ -1814,7 +1814,7 @@ def order_xp_embed(gid: int, uid: int) -> discord.Embed:
         inline=False,
     )
     if summary['orders']:
-        status_icons = {'approved': '✅', 'pending': '⏳', 'rejected': '❌'}
+        status_icons = {'approved': '✅', 'pending': '⏳', 'rejected': '❌', 'cancelled': '🚫'}
         lines = [
             f"{status_icons.get(order['status'], '•')} "
             f"`{discord.utils.escape_markdown(order['order_reference'])}` — "
@@ -2003,19 +2003,18 @@ async def submit_order_from_interaction(interaction: discord.Interaction, refere
                    + ('A moderator will verify it in Shopify.' if notified else
                       'Your submission is saved, but the moderator review channel needs configuring.'))
     elif status == 'pending':
-        message = '⏳ Your one-time Order XP request is already awaiting moderator review.'
+        message = '⏳ Your Order XP request is pending. Cancel it from the private status panel to submit another.'
     elif status == 'approved':
         message = '✅ Order XP granted — milestone objective complete.'
     elif status == 'rejected':
-        message = ('❌ Your one-time Order XP request was rejected. '
-                   'Please contact a moderator if you believe this is incorrect.')
+        message = '❌ Your request was rejected. You may submit a new order number.'
     elif status == 'duplicate':
         message = '❌ That order reference is already registered to another Guild member. Contact a moderator.'
     else:
         message = '❌ Enter a valid Shopify order reference (1–80 characters, no private details).'
     await interaction.followup.send(
         message, embed=order_xp_embed(interaction.guild_id, interaction.user.id),
-        view=OrderXPView(interaction.user.id), ephemeral=True,
+        view=OrderXPView(interaction.user.id, interaction.guild_id), ephemeral=True,
     )
 
 
@@ -2136,11 +2135,6 @@ class MilestoneQuestsView(discord.ui.View):
             view=self,
         )
 
-    @discord.ui.button(label='Cancel', emoji='✖️', style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content='Order XP panel closed. No new order submitted.', embed=None, view=None)
-        self.stop()
-
 
 async def open_order_submission(interaction: discord.Interaction) -> None:
     """Show the order modal only before a member makes their lifetime request."""
@@ -2155,14 +2149,10 @@ async def open_order_submission(interaction: discord.Interaction) -> None:
         )
     if status == 'pending':
         return await interaction.response.send_message(
-            '⏳ Your Order XP request is already awaiting moderator approval. '
-            'You can view its status under Milestone Quests.',
-            ephemeral=True,
-        )
-    if status == 'rejected':
-        return await interaction.response.send_message(
-            '❌ Your one-time Order XP request was rejected. '
-            'Please contact a moderator if it needs reviewing.',
+            '⏳ Your Order XP request is awaiting moderator approval. '
+            'Use Cancel Request below to withdraw it and submit a replacement.',
+            embed=order_xp_embed(interaction.guild_id, interaction.user.id),
+            view=OrderXPView(interaction.user.id, interaction.guild_id),
             ephemeral=True,
         )
     await interaction.response.send_modal(OrderReferenceModal())
@@ -2179,9 +2169,15 @@ class OrderReferenceModal(discord.ui.Modal, title='Submit a GYMGUILD order'):
 
 
 class OrderXPView(discord.ui.View):
-    def __init__(self, user_id: int):
+    """Private request-status view; cancel is available only while pending."""
+    def __init__(self, user_id: int, guild_id: int | None = None):
         super().__init__(timeout=300)
         self.user_id = user_id
+        if guild_id is not None:
+            self.update_controls(guild_id)
+
+    def update_controls(self, guild_id: int):
+        self.cancel_request.disabled = order_submission_status(guild_id, self.user_id) != 'pending'
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
@@ -2189,22 +2185,50 @@ class OrderXPView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label='Submit Order', emoji='🛍️', style=discord.ButtonStyle.primary)
-    async def submit_order(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await open_order_submission(interaction)
-
     @discord.ui.button(label='Refresh Status', emoji='🔄', style=discord.ButtonStyle.secondary)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.update_controls(interaction.guild_id)
         await interaction.response.edit_message(
             content='✦ Your latest order XP status',
-            embed=order_xp_embed(interaction.guild_id, interaction.user.id),
+            embed=order_xp_embed(interaction.guild_id, interaction.user.id), view=self,
+        )
+
+    @discord.ui.button(label='Cancel Request', emoji='✖️', style=discord.ButtonStyle.danger)
+    async def cancel_request(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID:
+            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
+        result, order_id, channel_id, message_id = cancel_purchase_order(
+            interaction.guild_id, interaction.user.id)
+        if result == 'cancelled':
+            await mark_cancelled_mod_review(interaction.guild, channel_id, message_id, order_id)
+            notice = ('🚫 **Order XP request cancelled.** No XP awarded. '
+                      'You can submit a replacement through the public Milestone Quests panel.')
+        elif result == 'approved':
+            notice = '✅ Order XP granted — milestone objective complete. Approved orders cannot be cancelled.'
+        else:
+            notice = 'There is no pending Order XP request to cancel.'
+        self.update_controls(interaction.guild_id)
+        await interaction.response.edit_message(
+            content=notice, embed=order_xp_embed(interaction.guild_id, interaction.user.id),
             view=self,
         )
 
-    @discord.ui.button(label='Cancel', emoji='✖️', style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content='Order XP panel closed. No new order submitted.', embed=None, view=None)
-        self.stop()
+
+async def mark_cancelled_mod_review(guild, channel_id, message_id, order_id):
+    """Retire a cancelled order review card; DB state is already authoritative."""
+    if channel_id is None or message_id is None:
+        return
+    channel = guild.get_channel(channel_id)
+    if not isinstance(channel, discord.TextChannel):
+        return
+    try:
+        msg = await channel.fetch_message(message_id)
+        embed = msg.embeds[0].copy() if msg.embeds else None
+        if embed:
+            embed.add_field(name='Decision', value='🚫 Cancelled by member — no XP awarded.', inline=False)
+        await msg.edit(embed=embed, view=None)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        log.warning('Could not retire cancelled order review card %s', order_id)
 
 
 class PurchaseReviewView(discord.ui.View):
