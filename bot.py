@@ -6,6 +6,9 @@ import re
 import random
 import hashlib
 import sqlite3
+import sys
+
+import admin_hub
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -128,6 +131,13 @@ def setup_db():
           PRIMARY KEY(guild_id,user_id));
         CREATE TABLE IF NOT EXISTS schedule_posts (guild_id INTEGER NOT NULL, post_key TEXT NOT NULL,
           PRIMARY KEY(guild_id,post_key));
+        CREATE TABLE IF NOT EXISTS admin_hub_audit (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          guild_id INTEGER NOT NULL, actor_id INTEGER NOT NULL,
+          target_id INTEGER, action TEXT NOT NULL,
+          details TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_admin_hub_audit
+          ON admin_hub_audit(guild_id,id);
         CREATE TABLE IF NOT EXISTS notification_preferences (
           guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, dm_enabled INTEGER NOT NULL DEFAULT 1,
           PRIMARY KEY(guild_id,user_id));
@@ -475,6 +485,7 @@ class Guildkeeper(commands.Bot):
         self.add_view(StarterTurnInView())
         self.add_view(WeeklyTurnInView())
         self.add_view(PlayerStatsView())
+        self.add_view(admin_hub.AdminHubView())
         self.add_view(MilestoneBoardView())
         self.add_view(RewardTicketAdminView())
         # Register outstanding review buttons after restarts.
@@ -4014,6 +4025,9 @@ async def on_app_command_error(interaction, error):
         log.warning('Could not reply to expired interaction for %s', interaction.command)
     except discord.HTTPException:
         log.exception('Could not deliver application command error response')
+
+admin_hub.install(sys.modules[__name__])
+
 
 if __name__=='__main__':
     if not TOKEN or TOKEN=='PASTE_YOUR_BOT_TOKEN_HERE' or not GUILD_ID:
