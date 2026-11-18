@@ -273,7 +273,17 @@ class PurchaseMilestoneTests(unittest.TestCase):
         )
         hub = bot.PlayerStatsView()
         self.assertTrue(hub.is_persistent())
-        self.assertIn('Milestone Quests', {button.label for button in hub.children})
+        self.assertNotIn('Milestone Quests', {button.label for button in hub.children})
+        self.assertEqual(len(hub.children), 9)
+        self.assertEqual(
+            [(button.label, button.row) for button in hub.children],
+            [('Profile', None), ('Streak', None), ('Ranks', None),
+             ('Activate Pause', 1), ('Resume XP', 1),
+             ('Inbox', 2), ('Bot DMs', 2), ('Claim Reward', 1),
+             ('Guild Blast', 2)],
+        )
+        self.assertEqual(len(bot.PrivateProgressView(self.uid, 'profile').children), 1)
+        self.assertEqual([b.label for b in bot.RankProfileButtonView(self.uid).children], ['View Rank'])
         self.assertLessEqual(len(hub.children), 25)
 
     def test_one_lifetime_submission_persists_after_restart(self):

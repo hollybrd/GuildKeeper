@@ -838,11 +838,32 @@ async def profile(interaction: discord.Interaction):
     streak_notice = streak_blocked_rank_notice(interaction.guild_id, interaction.user.id, xp)
     await reply(interaction, f'✦ **{interaction.user.display_name}**\nRank: **{rank_for(xp, interaction.guild_id, interaction.user.id)}**\nXP: **{xp}**\nLifetime objectives completed: **{lifetime_objectives(interaction.guild_id, interaction.user.id)}**\nLongest streak: **{longest_streak(interaction.guild_id, interaction.user.id)} weeks**\n\n**Rewards**\n{reward_eligibility_text(interaction.guild_id, interaction.user.id)}\n{upcoming}' + ('\n\n' + streak_notice if streak_notice else '') + '\n\n🎟️ To request an unlocked rank reward, visit **#stats-and-streaks** and press **Claim Reward** in the Player Hub.')
 
+class RankProfileButtonView(discord.ui.View):
+    """Owner-only shortcut from /ranks to the member's live profile."""
+    def __init__(self, user_id: int):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message('This rank panel belongs to another member.', ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='View Rank', emoji='👤', style=discord.ButtonStyle.primary)
+    async def view_rank(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not only_guild(interaction):
+            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
+        await interaction.response.send_message(
+            profile_progress_text(interaction.guild_id, interaction.user.id, interaction.user.display_name),
+            ephemeral=True)
+
+
 @bot.tree.command(name='ranks', description='See Guild XP milestones')
 async def ranks(interaction: discord.Interaction):
     xp = get_xp(interaction.guild_id, interaction.user.id)
     streak_notice = streak_blocked_rank_notice(interaction.guild_id, interaction.user.id, xp)
-    await reply(interaction, '**GYMGUILD RANKS**\n'+'\n'.join(f'✦ **{name}** — {threshold:,} XP' + (f' + {STREAK_REQUIREMENTS[name]}-week **active** streak to unlock' if name in STREAK_REQUIREMENTS else '') for name,threshold in RANKS) + '\n\n**Rank rules:** Streaks must be active when unlocking Master, Legend or Paragon. Once unlocked, breaking your streak will not demote you; losing XP below a rank threshold can. Regaining XP restores previously unlocked ranks without repeating the streak.\n**Rewards:** Master (10%), Legend (15%) and Paragon (20%) are unlocked permanently when their rank requirements are first met. Each reward can be claimed **once**, even after an XP demotion. Paused weeks preserve streaks but do not increase them.' + ('\n\n' + streak_notice if streak_notice else ''))
+    await interaction.response.send_message( '**GYMGUILD RANKS**\n'+'\n'.join(f'✦ **{name}** — {threshold:,} XP' + (f' + {STREAK_REQUIREMENTS[name]}-week **active** streak to unlock' if name in STREAK_REQUIREMENTS else '') for name,threshold in RANKS) + '\n\n**Rank rules:** Streaks must be active when unlocking Master, Legend or Paragon. Once unlocked, breaking your streak will not demote you; losing XP below a rank threshold can. Regaining XP restores previously unlocked ranks without repeating the streak.\n**Rewards:** Master (10%), Legend (15%) and Paragon (20%) are unlocked permanently when their rank requirements are first met. Each reward can be claimed **once**, even after an XP demotion. Paused weeks preserve streaks but do not increase them.' + ('\n\n' + streak_notice if streak_notice else ''), view=RankProfileButtonView(interaction.user.id), ephemeral=True)
 
 
 
@@ -3282,11 +3303,10 @@ def player_stats_embed():
     embed.add_field(name='🏆 Ranks', value='All Guild XP ranks and requirements', inline=False)
     embed.add_field(name='⏸️ Activate Pause', value='Use a pause for the current weekly quest (2 per rolling 13 weeks)', inline=False)
     embed.add_field(name='▶️ Resume XP', value='End an active pause early and resume earning XP; the pause is not refunded', inline=False)
+    embed.add_field(name='🎟️ Claim Reward', value='See eligible one-time rank rewards and open a private ticket with admins', inline=False)
     embed.add_field(name='📥 Inbox', value='Review private alerts and your lost XP history', inline=False)
     embed.add_field(name='✉️ Bot DMs', value='Disable DMs to stop private pings; Inbox remains available', inline=False)
     embed.add_field(name='🔔 Guild Blast', value='Opt in or out of Guild announcement mentions at any time', inline=False)
-    embed.add_field(name='🎟️ Claim Reward', value='See eligible one-time rank rewards and open a private ticket with admins', inline=False)
-    embed.add_field(name='🏆 Milestone Quests', value='See your milestones and progress, and submit Shopify orders', inline=False)
     embed.set_footer(text='GYMGUILD ✦ Where culture meets strength')
     return embed
 
@@ -3465,9 +3485,11 @@ class PlayerStatsView(discord.ui.View):
     @discord.ui.button(label='Ranks', emoji='🏆', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:stats:ranks')
     async def ranks_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID:
+            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
         await interaction.response.send_message(
-            **private_progress_content('ranks', interaction),
-            view=PrivateProgressView(interaction.user.id, 'ranks'), ephemeral=True)
+            profile_progress_text(interaction.guild_id, interaction.user.id, interaction.user.display_name),
+            ephemeral=True)
 
     @discord.ui.button(label='Activate Pause', emoji='⏸️', style=discord.ButtonStyle.primary,
                        custom_id='guildkeeper:stats:activate_pause', row=1)
@@ -3498,21 +3520,6 @@ class PlayerStatsView(discord.ui.View):
             view=ConfirmResumeView(interaction.user.id), ephemeral=True)
 
 
-    @discord.ui.button(label='Guild Blast', emoji='🔔', style=discord.ButtonStyle.secondary,
-                       custom_id='guildkeeper:stats:guild_blast', row=1)
-    async def guild_blast_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.guild_id != GUILD_ID or not isinstance(interaction.user, discord.Member):
-            return await interaction.response.send_message('This button is only available in the Guild.', ephemeral=True)
-        role = interaction.guild.get_role(GUILD_BLAST_ROLE_ID) if GUILD_BLAST_ROLE_ID else None
-        if role is None:
-            return await interaction.response.send_message('Guild Blast is not configured. Ask an admin to set GUILD_BLAST_ROLE_ID.', ephemeral=True)
-        enabled = role in interaction.user.roles
-        await interaction.response.send_message(
-            f'🔔 **Guild Blast** — Currently **{"enabled" if enabled else "disabled"}**.\n'
-            'Guild Blast is an optional role used for announcements by admins and Guildkeeper. '
-            'Choose below to change your preference.',
-            view=GuildBlastToggleView(interaction.user.id), ephemeral=True)
-
     @discord.ui.button(label='Inbox', emoji='📥', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:stats:inbox',row=2)
     async def inbox_button(self, interaction, button):
@@ -3535,16 +3542,6 @@ class PlayerStatsView(discord.ui.View):
             '**Inbox** in **#stats-and-streaks**, but you must check it yourself.',
             view=BotDMToggleView(interaction.user.id),ephemeral=True)
 
-    @discord.ui.button(label='Milestone Quests', emoji='🏆', style=discord.ButtonStyle.secondary,
-                       custom_id='guildkeeper:stats:milestone_quests', row=2)
-    async def milestone_quests_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.guild_id != GUILD_ID:
-            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
-        await interaction.response.send_message(
-            embed=milestone_quests_embed(interaction.guild_id, interaction.user.id),
-            view=MilestoneQuestsView(interaction.user.id), ephemeral=True,
-        )
-
     @discord.ui.button(label='Claim Reward', emoji='🎟️', style=discord.ButtonStyle.primary,
                        custom_id='guildkeeper:stats:reward_ticket', row=1)
     async def reward_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3554,6 +3551,22 @@ class PlayerStatsView(discord.ui.View):
             guild_rewards_progress_text(interaction.guild_id, interaction.user.id),
             view=RewardChoiceView(interaction.user.id), ephemeral=True)
 
+
+
+    @discord.ui.button(label='Guild Blast', emoji='🔔', style=discord.ButtonStyle.secondary,
+                       custom_id='guildkeeper:stats:guild_blast', row=2)
+    async def guild_blast_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID or not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message('This button is only available in the Guild.', ephemeral=True)
+        role = interaction.guild.get_role(GUILD_BLAST_ROLE_ID) if GUILD_BLAST_ROLE_ID else None
+        if role is None:
+            return await interaction.response.send_message('Guild Blast is not configured. Ask an admin to set GUILD_BLAST_ROLE_ID.', ephemeral=True)
+        enabled = role in interaction.user.roles
+        await interaction.response.send_message(
+            f'🔔 **Guild Blast** — Currently **{"enabled" if enabled else "disabled"}**.\n'
+            'Guild Blast is an optional role used for announcements by admins and Guildkeeper. '
+            'Choose below to change your preference.',
+            view=GuildBlastToggleView(interaction.user.id), ephemeral=True)
 
 class GuildBlastToggleView(discord.ui.View):
     def __init__(self, user_id: int):
