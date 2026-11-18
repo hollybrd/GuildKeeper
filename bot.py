@@ -3303,7 +3303,6 @@ def player_stats_embed():
     embed.add_field(name='🏆 Ranks', value='All Guild XP ranks and requirements', inline=False)
     embed.add_field(name='📜 All Quests', value='Track weekly objectives and permanent milestones with links to their channels', inline=False)
     embed.add_field(name='⏸️ Pauses', value='Check your balance and active pause; activate or resume XP privately', inline=False)
-    embed.add_field(name='▶️ Resume XP', value='End an active pause early and resume earning XP; the pause is not refunded', inline=False)
     embed.add_field(name='🎟️ Claim Reward', value='See eligible one-time rank rewards and open a private ticket with admins', inline=False)
     embed.add_field(name='📥 Inbox', value='Review private alerts and your lost XP history', inline=False)
     embed.add_field(name='✉️ Bot DMs', value='Disable DMs to stop private pings; Inbox remains available', inline=False)
@@ -3604,23 +3603,6 @@ class PlayerStatsView(discord.ui.View):
             view=PausePanelView(interaction.user.id), ephemeral=True)
 
 
-    @discord.ui.button(label='Resume XP', emoji='▶️', style=discord.ButtonStyle.success,
-                       custom_id='guildkeeper:stats:resume_xp', row=1)
-    async def resume_xp_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.guild_id != GUILD_ID:
-            return await interaction.response.send_message('This button is not available here.', ephemeral=True)
-        if not is_paused(interaction.guild_id, interaction.user.id, week_key()):
-            return await interaction.response.send_message(
-                '▶️ You do not currently have an active pause. XP is already enabled.\n'
-                + pause_allowance_text(interaction.guild_id, interaction.user.id), ephemeral=True)
-        await interaction.response.send_message(
-            '▶️ **Resume earning XP?** Your pause will end immediately and you can earn weekly XP again. '
-            '**This will NOT refund your pause** — it still counts toward your 2 pauses per rolling 13 weeks. '
-            'The week will remain recorded as a pause for streak protection.\n'
-            + pause_allowance_text(interaction.guild_id, interaction.user.id),
-            view=ConfirmResumeView(interaction.user.id), ephemeral=True)
-
-
     @discord.ui.button(label='Inbox', emoji='📥', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:stats:inbox',row=2)
     async def inbox_button(self, interaction, button):
@@ -3655,7 +3637,7 @@ class PlayerStatsView(discord.ui.View):
 
 
     @discord.ui.button(label='All Quests', emoji='📜', style=discord.ButtonStyle.secondary,
-                       custom_id='guildkeeper:stats:all_quests', row=0)
+                       custom_id='guildkeeper:stats:all_quests', row=1)
     async def all_quests_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.guild_id != GUILD_ID:
             return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)

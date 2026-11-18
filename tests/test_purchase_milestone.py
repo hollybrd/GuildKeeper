@@ -274,14 +274,15 @@ class PurchaseMilestoneTests(unittest.TestCase):
         hub = bot.PlayerStatsView()
         self.assertTrue(hub.is_persistent())
         self.assertNotIn('Milestone Quests', {button.label for button in hub.children})
-        self.assertEqual(len(hub.children), 10)
+        self.assertEqual(len(hub.children), 9)
+        self.assertNotIn('Resume XP', {button.label for button in hub.children})
         self.assertEqual([button.label for button in bot.AllQuestsView(self.uid).children], ['Refresh Quests'])
         self.assertEqual(
             [(button.label, button.row) for button in hub.children],
             [('Profile', None), ('Streak', None), ('Ranks', None),
-             ('Pauses', 1), ('Resume XP', 1),
+             ('Pauses', 1),
              ('Inbox', 2), ('Bot DMs', 2), ('Claim Reward', 1),
-             ('All Quests', 0), ('Guild Blast', 2)],
+             ('All Quests', 1), ('Guild Blast', 2)],
         )
         pause_labels = [b.label for b in bot.PausePanelView(self.uid).children]
         self.assertEqual(pause_labels, ['Activate Pause', 'Resume XP', 'Refresh'])
