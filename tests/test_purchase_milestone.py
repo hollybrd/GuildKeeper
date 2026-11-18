@@ -1,4 +1,4 @@
-"""First-purchase milestone regression tests using an isolated SQLite database."""
+"""Order XP panel storage and moderator review regression tests."""
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,11 +6,11 @@ from pathlib import Path
 import bot
 
 
-class FirstPurchaseMilestoneTests(unittest.TestCase):
+class PurchaseMilestoneTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.original_db = bot.DB
-        bot.DB = Path(self.tmp.name) / "test-purchase.db"
+        bot.DB = Path(self.tmp.name) / "purchase-test.db"
         bot.setup_db()
         self.gid, self.uid = 123456, 789
 
@@ -18,7 +18,7 @@ class FirstPurchaseMilestoneTests(unittest.TestCase):
         bot.DB = self.original_db
         self.tmp.cleanup()
 
-    def test_submit_pending_approve_once_and_preserve_existing_records(self):
+    def test_first_approved_order_awards_50_and_preserves_rewards(self):
         with bot.connect() as db:
             db.execute(
                 'INSERT INTO members(guild_id,user_id,xp) VALUES (?,?,?)',
@@ -28,66 +28,83 @@ class FirstPurchaseMilestoneTests(unittest.TestCase):
                 'INSERT INTO reward_tickets(guild_id,user_id,rank,status) VALUES (?,?,?,?)',
                 (self.gid, self.uid, 'Master', 'fulfilled'),
             )
-        self.assertEqual(bot.submit_first_purchase_milestone(self.gid, self.uid, '#1234'), 'submitted')
-        self.assertEqual(bot.submit_first_purchase_milestone(self.gid, self.uid, '#other'), 'pending')
-        self.assertEqual(bot.review_first_purchase_milestone(self.gid, self.uid, True), 'awarded')
+        status, order_id = bot.submit_purchase_order(self.gid, self.uid, '#1001')
+        self.assertEqual(status, 'submitted')
+        self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, '#1001')[0], 'pending')
+        self.assertEqual(bot.review_purchase_order(self.gid, order_id, 22, True), ('awarded', self.uid))
         self.assertEqual(bot.get_xp(self.gid, self.uid), 200)
-        self.assertEqual(bot.review_first_purchase_milestone(self.gid, self.uid, True), 'not_pending')
-        self.assertEqual(bot.submit_first_purchase_milestone(self.gid, self.uid, '#another'), 'awarded')
-        self.assertEqual(bot.get_xp(self.gid, self.uid), 200)
+        self.assertEqual(bot.review_purchase_order(self.gid, order_id, 22, True)[0], 'not_pending')
+        summary = bot.purchase_order_summary(self.gid, self.uid)
+        self.assertEqual(summary['approved'], 1)
+        self.assertEqual(summary['earned_xp'], 50)
+        self.assertEqual(summary['pending'], 0)
+        self.assertEqual(summary['potential_xp'], 0)
         with bot.connect() as db:
-            row = db.execute(
-                'SELECT status,evidence FROM pending_milestones WHERE guild_id=? AND user_id=? AND kind=?',
-                (self.gid, self.uid, 'purchase1'),
-            ).fetchone()
-            self.assertEqual((row['status'], row['evidence']), ('approved', '#1234'))
-            claims = db.execute(
-                'SELECT COUNT(*) FROM milestone_claims WHERE guild_id=? AND user_id=? AND kind=?',
-                (self.gid, self.uid, 'purchase1'),
-            ).fetchone()[0]
-            self.assertEqual(claims, 1)
-            tickets = db.execute(
+            self.assertEqual(db.execute(
                 'SELECT COUNT(*) FROM reward_tickets WHERE guild_id=? AND user_id=?',
                 (self.gid, self.uid),
-            ).fetchone()[0]
-            self.assertEqual(tickets, 1)
+            ).fetchone()[0], 1)
 
-    def test_rejection_and_resubmit(self):
-        self.assertEqual(bot.submit_first_purchase_milestone(self.gid, self.uid, 'order-a'), 'submitted')
-        self.assertEqual(bot.review_first_purchase_milestone(self.gid, self.uid, False), 'rejected')
-        self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
-        self.assertEqual(bot.submit_first_purchase_milestone(self.gid, self.uid, 'order-b'), 'submitted')
-        self.assertEqual(bot.review_first_purchase_milestone(self.gid, self.uid, True), 'awarded')
+    def test_future_orders_tracked_but_first_purchase_reward_once(self):
+        status, first = bot.submit_purchase_order(self.gid, self.uid, '#1001')
+        self.assertEqual(bot.review_purchase_order(self.gid, first, 1, True)[0], 'awarded')
+        status, second = bot.submit_purchase_order(self.gid, self.uid, '#1002')
+        self.assertEqual(status, 'submitted')
+        self.assertEqual(bot.review_purchase_order(self.gid, second, 1, True)[0], 'approved_no_xp')
         self.assertEqual(bot.get_xp(self.gid, self.uid), 50)
-
-    def test_never_overwrite_already_claimed_boost_or_purchase(self):
-        with bot.connect() as db:
-            db.execute(
-                'INSERT INTO milestone_claims(guild_id,user_id,kind,claimed_at) VALUES (?,?,?,?)',
-                (self.gid, self.uid, 'purchase1', bot.utc_now().isoformat()),
-            )
-            db.execute(
-                'INSERT INTO milestone_claims(guild_id,user_id,kind,claimed_at) VALUES (?,?,?,?)',
-                (self.gid, self.uid, 'boost1', bot.utc_now().isoformat()),
-            )
-        self.assertEqual(bot.submit_first_purchase_milestone(self.gid, self.uid, '#xyz'), 'awarded')
+        summary = bot.purchase_order_summary(self.gid, self.uid)
+        self.assertEqual(summary['approved'], 2)
+        self.assertEqual(summary['earned_xp'], 50)
         with bot.connect() as db:
             self.assertEqual(db.execute(
-                'SELECT COUNT(*) FROM milestone_claims WHERE guild_id=? AND user_id=?',
+                "SELECT COUNT(*) FROM milestone_claims WHERE guild_id=? AND user_id=? AND kind='purchase1'",
                 (self.gid, self.uid),
-            ).fetchone()[0], 2)
+            ).fetchone()[0], 1)
 
-    def test_invalid_reference_and_other_users_untouched(self):
-        for reference in ('', ' ', 'x' * 81, 'newline\nvalue'):
-            self.assertEqual(bot.submit_first_purchase_milestone(self.gid, self.uid, reference), 'invalid')
-        self.assertEqual(bot.submit_first_purchase_milestone(self.gid, self.uid + 1, '#abcd'), 'submitted')
-        self.assertEqual(bot.submit_first_purchase_milestone(self.gid, self.uid, '#1234'), 'submitted')
-        self.assertEqual(bot.review_first_purchase_milestone(self.gid, self.uid, True), 'awarded')
+    def test_pending_status_and_rejection_resubmission(self):
+        self.assertEqual(bot.purchase_order_summary(self.gid, self.uid)['approved'], 0)
+        status, first = bot.submit_purchase_order(self.gid, self.uid, 'A001')
+        self.assertEqual(status, 'submitted')
+        self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, 'A002')[0], 'pending')
+        summary = bot.purchase_order_summary(self.gid, self.uid)
+        self.assertEqual(summary['pending'], 1)
+        self.assertEqual(summary['potential_xp'], 50)
+        self.assertEqual(bot.review_purchase_order(self.gid, first, 1, False)[0], 'rejected')
+        self.assertEqual(bot.purchase_order_summary(self.gid, self.uid)['rejected'], 1)
+        status, again = bot.submit_purchase_order(self.gid, self.uid, 'A001')
+        self.assertEqual((status, again), ('submitted', first))
+        self.assertEqual(bot.review_purchase_order(self.gid, first, 1, True)[0], 'awarded')
+
+    def test_orders_scoped_and_order_reuse_blocked(self):
+        status, first = bot.submit_purchase_order(self.gid, self.uid, 'XYZ')
+        self.assertEqual(status, 'submitted')
+        self.assertEqual(bot.submit_purchase_order(self.gid, self.uid + 1, 'XYZ')[0], 'duplicate')
+        status, second = bot.submit_purchase_order(self.gid, self.uid + 1, 'XYZ2')
+        self.assertEqual(status, 'submitted')
+        bot.review_purchase_order(self.gid, first, 1, True)
+        self.assertEqual(bot.purchase_order_summary(self.gid, self.uid + 1)['pending'], 1)
+        self.assertEqual(bot.get_xp(self.gid, self.uid + 1), 0)
+        self.assertEqual(bot.review_purchase_order(self.gid, second, 1, False)[0], 'rejected')
+
+    def test_invalid_reference_preserves_data(self):
+        for invalid in ('', '   ', 'a' * 81, 'bad\nref'):
+            self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, invalid), ('invalid', None))
+        self.assertEqual(bot.purchase_order_summary(self.gid, self.uid)['orders'], [])
+
+    def test_legacy_pending_purchase_is_migrated_without_awarding_xp(self):
         with bot.connect() as db:
-            self.assertEqual(db.execute(
-                "SELECT status FROM pending_milestones WHERE guild_id=? AND user_id=? AND kind=?",
-                (self.gid, self.uid + 1, 'purchase1'),
-            ).fetchone()['status'], 'pending')
+            db.execute(
+                'INSERT INTO pending_milestones(guild_id,user_id,kind,evidence,status,created_at) '
+                "VALUES (?,?, 'purchase1', ?, 'pending', ?)",
+                (self.gid, self.uid, '#legacy', bot.utc_now().isoformat()),
+            )
+        bot.setup_db()
+        summary = bot.purchase_order_summary(self.gid, self.uid)
+        self.assertEqual(summary['pending'], 1)
+        self.assertEqual(summary['earned_xp'], 0)
+        self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, '#legacy')[0], 'pending')
+        bot.setup_db()
+        self.assertEqual(bot.purchase_order_summary(self.gid, self.uid)['pending'], 1)
 
 
 if __name__ == '__main__':
