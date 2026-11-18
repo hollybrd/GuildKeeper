@@ -195,6 +195,45 @@ class PurchaseMilestoneTests(unittest.TestCase):
             {'Refresh Progress'},
         )
 
+    def test_boost_button_guidance_and_earned_message(self):
+        self.assertIn('Boost Server', {
+            item.label for item in bot.MilestoneBoardView().children})
+        info = bot.boost_milestone_message(self.gid, self.uid, False)
+        self.assertIn('Server Boosts', info)
+        self.assertIn('100 XP', info)
+        self.assertIn('payment', info)
+        self.assertNotIn('XP granted!', info)
+        with bot.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.assertTrue(bot.grant_once(
+                db, 'milestone_claims', self.gid, self.uid, 'boost1',
+                bot.MILESTONE_XP['boost1']))
+        thank_you = bot.boost_milestone_message(self.gid, self.uid, True)
+        self.assertIn('100 XP granted', thank_you)
+        self.assertIn('Thank you', thank_you)
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 100)
+        self.assertEqual(bot.boost_milestone_message(self.gid, self.uid, False), thank_you)
+
+    def test_cancelled_order_retains_mod_history_and_blocks_old_approval(self):
+        status, old = bot.submit_purchase_order(self.gid, self.uid, 'HIST001')
+        self.assertEqual(status, 'submitted')
+        with bot.connect() as db:
+            db.execute(
+                'UPDATE purchase_orders SET review_channel_id=?,review_message_id=? WHERE id=?',
+                (222, 333, old),
+            )
+        result, oid, channel, message = bot.cancel_purchase_order(self.gid, self.uid)
+        self.assertEqual((result, oid, channel, message), ('cancelled', old, 222, 333))
+        self.assertEqual(bot.review_purchase_order(self.gid, old, 44, True)[0], 'not_pending')
+        # Never reopen the original review card's ID, even with the same reference.
+        self.assertEqual(bot.submit_purchase_order(
+            self.gid, self.uid, 'HIST001')[0], 'used_reference')
+        status, new = bot.submit_purchase_order(self.gid, self.uid, 'HIST002')
+        self.assertEqual(status, 'submitted')
+        self.assertNotEqual(new, old)
+        self.assertEqual(bot.review_purchase_order(self.gid, new, 44, True)[0], 'awarded')
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 250)
+
     def test_invalid_reference_preserves_data(self):
         for invalid in ('', '   ', 'a' * 81, 'bad\nref'):
             self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, invalid), ('invalid', None))
@@ -205,7 +244,7 @@ class PurchaseMilestoneTests(unittest.TestCase):
         self.assertTrue(public.is_persistent())
         self.assertEqual(
             {button.label for button in public.children},
-            {'My Progress', 'Submit Order XP'},
+            {'My Progress', 'Submit Order XP', 'Boost Server'},
         )
         review = bot.PurchaseReviewView(51)
         self.assertTrue(review.is_persistent())
