@@ -1787,24 +1787,6 @@ def purchase_order_summary(gid: int, uid: int) -> dict:
     }
 
 
-def order_rewards_text(gid: int, uid: int) -> str:
-    summary = purchase_order_summary(gid, uid)
-    milestone = milestone_progress(gid, uid)
-    first = (f'✅ Unlocked — {MILESTONE_XP["purchase1"]} XP reward unlocked' if summary['earned_xp']
-             else f'⏳ {summary["pending"]} order awaiting approval — +{MILESTONE_XP["purchase1"]} XP possible'
-             if summary['pending'] else f'🔒 Locked — first verified order awards {MILESTONE_XP["purchase1"]} XP')
-    completion = ('✅ Claimed — 500 XP earned'
-                  if milestone['bonus_earned'] else
-                  f'🔒 {milestone["completed"]}/{milestone["total"]} milestones completed — 500 XP available')
-    return (
-        '**🛍️ Order XP**\n'
-        f'Approved orders: **{summary["approved"]}** · Pending: **{summary["pending"]}**\n'
-        f'First purchase: {first}\n'
-        f'**🏆 Main Quest Completion:** {completion}\n'
-        'Submit order references from **Milestone Quests** in the Player Hub.'
-    )
-
-
 def order_xp_embed(gid: int, uid: int) -> discord.Embed:
     summary = purchase_order_summary(gid, uid)
     embed = discord.Embed(
@@ -2133,7 +2115,7 @@ async def open_order_submission(interaction: discord.Interaction) -> None:
     if status == 'pending':
         return await interaction.response.send_message(
             '⏳ Your Order XP request is already awaiting moderator approval. '
-            'You can view its status under Milestone Quests or Rewards.',
+            'You can view its status under Milestone Quests.',
             ephemeral=True,
         )
     if status == 'rejected':
@@ -2922,9 +2904,8 @@ class PlayerStatsView(discord.ui.View):
             return await interaction.response.send_message('This button is not available here.', ephemeral=True)
         await interaction.response.send_message(
             '🎟️ **Guild Rewards**\n\n' + reward_eligibility_text(interaction.guild_id, interaction.user.id)
-            + '\n\n' + order_rewards_text(interaction.guild_id, interaction.user.id)
             + '\n\nSelect an **eligible, unclaimed** rank reward below to open a private ticket with Guild admins. '
-              'Order XP is reviewed from Milestone Quests; rank rewards are one-time Shopify discount codes.',
+              'Rank rewards are one-time Shopify discount codes, fulfilled manually by an admin.',
             view=RewardChoiceView(interaction.user.id), ephemeral=True)
 
 
