@@ -1,6 +1,13 @@
 """Read-only GuildKeeper diagnostics shown from the standalone Admin Hub Health Check.
 
 This is a point-in-time check, not a guarantee that all future events succeed.
+
+
+READING GUIDE
+-------------
+Collects read-only diagnostic checks for the Admin Hub. Unlike a Test Runner,
+this checks configuration and observable state, not every possible user action.
+A healthy report means no problem was detected at that moment.
 """
 import discord
 import panel_health
@@ -27,6 +34,7 @@ def status(label, state, message):
     return {'name': label, 'state': state, 'detail': message}
 
 
+# Check SQLite integrity before trusting player and quest data.
 def check_database(api):
     try:
         with api.connect() as db:
@@ -49,6 +57,7 @@ def check_database(api):
         return status('Database', 'problem', type(exc).__name__ + ' while querying database')
 
 
+# Inspect bot availability, scheduler state and recent job errors.
 def check_runtime(api, guild):
     checks = []
     if guild is None or not api.bot.is_ready():
@@ -101,6 +110,7 @@ def check_runtime(api, guild):
     return checks
 
 
+# Check each configured Discord channel exists and the bot has appropriate permissions.
 def check_channels(api, guild):
     if guild is None:
         return [status('Channel configuration', 'unknown',
@@ -133,6 +143,7 @@ def check_channels(api, guild):
     return checks
 
 
+# Check configured Discord roles exist and can be managed.
 def check_roles(api, guild):
     if guild is None or guild.me is None:
         return [status('Role configuration', 'unknown', 'Could not inspect Guild roles')]
@@ -160,6 +171,7 @@ def check_roles(api, guild):
     return checks
 
 
+# Combine all checks into one report without making changes in Discord.
 async def run(api, guild):
     """Do not mutate Discord messages, guild data, or persistent bot state."""
     core = check_runtime(api, guild) + [check_database(api)]
@@ -208,6 +220,7 @@ async def run(api, guild):
     return {'core': core, 'panels': panels}
 
 
+# Reduce many detailed check states to one top-level health label.
 def overall(report):
     states = {item['state'] for item in report['core'] + report['panels']}
     if 'problem' in states or 'missing' in states or 'outdated' in states or 'setup' in states:
@@ -217,6 +230,7 @@ def overall(report):
     return 'healthy'
 
 
+# Convert technical results into a readable Discord embed for moderators.
 def render(report):
     flag = overall(report)
     header = {
