@@ -137,6 +137,10 @@ def setup_db():
             "WHERE kind='purchase1' AND evidence IS NOT NULL AND TRIM(evidence) != '' "
             "AND status IN ('pending','approved','rejected')"
         )
+        purchase_columns = {r['name'] for r in db.execute('PRAGMA table_info(purchase_orders)')}
+        for col in ('review_channel_id', 'review_message_id'):
+            if col not in purchase_columns:
+                db.execute(f'ALTER TABLE purchase_orders ADD COLUMN {col} INTEGER')
         # Seed historic high-rank achievements before any new rank is awarded.
         # Keep the highest existing watermark on subsequent bot restarts.
         historic = db.execute(
@@ -1825,26 +1829,27 @@ def order_xp_embed(gid: int, uid: int) -> discord.Embed:
 
 
 def order_submission_status(gid: int, uid: int) -> str:
-    """Exactly one lifetime purchase request; historic records stay intact."""
+    """Only a granted purchase milestone permanently closes submissions."""
     with connect() as db:
-        claimed = db.execute(
+        if db.execute(
             "SELECT 1 FROM milestone_claims WHERE guild_id=? AND user_id=? AND kind='purchase1'",
             (gid, uid),
-        ).fetchone()
-        if claimed:
+        ).fetchone():
             return 'approved'
-        row = db.execute(
-            'SELECT status FROM purchase_orders WHERE guild_id=? AND user_id=? '
-            'ORDER BY id LIMIT 1', (gid, uid),
+        pending = db.execute(
+            "SELECT 1 FROM purchase_orders WHERE guild_id=? AND user_id=? AND status='pending'",
+            (gid, uid),
         ).fetchone()
-    return row['status'] if row else 'available'
+        if pending:
+            return 'pending'
+    return 'available'
 
 
 def submit_purchase_order(gid: int, uid: int, reference: str) -> tuple[str, int | None]:
-    """Save at most one lifetime order request per member, including rejected ones.
+    """One open request per member. Rejected/cancelled requests can be retried.
 
-    Do not delete, replace or reopen historical submissions, even when another
-    record exists from before this restriction was introduced.
+    All checks and writes run in one immediate transaction; an approved
+    milestone prevents new requests even if earlier records exist.
     """
     reference = reference.strip()
     with connect() as db:
@@ -1855,26 +1860,64 @@ def submit_purchase_order(gid: int, uid: int, reference: str) -> tuple[str, int 
         ).fetchone()
         if claim:
             return 'approved', None
-        old = db.execute(
-            'SELECT id,status FROM purchase_orders WHERE guild_id=? AND user_id=? '
-            'ORDER BY id LIMIT 1', (gid, uid),
+        pending = db.execute(
+            "SELECT id FROM purchase_orders WHERE guild_id=? AND user_id=? AND status='pending'",
+            (gid, uid),
         ).fetchone()
-        if old:
-            return old['status'], old['id']
+        if pending:
+            return 'pending', pending['id']
         if not reference or len(reference) > 80 or any(ord(char) < 32 for char in reference):
             return 'invalid', None
         row = db.execute(
-            'SELECT id FROM purchase_orders WHERE guild_id=? AND order_reference=?',
+            'SELECT id,user_id,status FROM purchase_orders '
+            'WHERE guild_id=? AND order_reference=?',
             (gid, reference),
         ).fetchone()
         if row:
-            return 'duplicate', None
+            if row['user_id'] != uid:
+                return 'duplicate', None
+            if row['status'] not in ('rejected', 'cancelled'):
+                return row['status'], row['id']
+            # Retrying the same reference reopens its existing row instead
+            # of violating the unique reference constraint.
+            db.execute(
+                "UPDATE purchase_orders SET status='pending',submitted_at=?,"
+                "reviewed_at=NULL,reviewed_by=NULL,review_channel_id=NULL,review_message_id=NULL "
+                "WHERE id=?",
+                (utc_now().isoformat(), row['id']),
+            )
+            return 'submitted', row['id']
         cur = db.execute(
             "INSERT INTO purchase_orders(guild_id,user_id,order_reference,status,submitted_at) "
             "VALUES (?,?,?,'pending',?)",
             (gid, uid, reference, utc_now().isoformat()),
         )
         return 'submitted', cur.lastrowid
+
+
+def cancel_purchase_order(gid: int, uid: int) -> tuple[str, int | None, int | None, int | None]:
+    """Withdraw ONLY the caller's pending request, atomically and without XP effects."""
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        claimed = db.execute(
+            "SELECT 1 FROM milestone_claims WHERE guild_id=? AND user_id=? AND kind='purchase1'",
+            (gid, uid),
+        ).fetchone()
+        if claimed:
+            return 'approved', None, None, None
+        row = db.execute(
+            "SELECT id,review_channel_id,review_message_id FROM purchase_orders "
+            "WHERE guild_id=? AND user_id=? AND status='pending' ORDER BY id DESC LIMIT 1",
+            (gid, uid),
+        ).fetchone()
+        if row is None:
+            return 'not_pending', None, None, None
+        db.execute(
+            "UPDATE purchase_orders SET status='cancelled',reviewed_at=?,reviewed_by=? "
+            "WHERE guild_id=? AND user_id=? AND id=? AND status='pending'",
+            (utc_now().isoformat(), uid, gid, uid, row['id']),
+        )
+        return 'cancelled', row['id'], row['review_channel_id'], row['review_message_id']
 
 
 def submit_first_purchase_milestone(gid: int, uid: int, reference: str) -> str:
