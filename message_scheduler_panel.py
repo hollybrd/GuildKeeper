@@ -34,11 +34,13 @@ def status_lines():
     return lines
 
 
-def timeline_text(limit=18):
-    entries=core.timeline(limit=limit)
+def timeline_text(page=0,per_page=10):
+    entries=core.timeline(limit=120)
+    page=max(0,page)
+    entries=entries[page*per_page:(page+1)*per_page]
     if not entries:
         return "📆 **Posting timeline**\nNo upcoming scheduled posts. Product alerts are event-driven."
-    lines=["📆 **Posting timeline (UK time)**",
+    lines=[f"📆 **Posting timeline | Page {page+1} (UK time)**",
            "Automatically generated previews. Event-based Shopify posts have no fixed delivery date.\n"]
     for when,title,frequency,channel,kind in entries:
         local=when.astimezone(core.TZ)
@@ -92,8 +94,8 @@ class SchedulerDashboard(discord.ui.View):
                        custom_id="guildkeeper:scheduler:timeline",row=0)
     async def timeline(self,interaction,button):
         await interaction.response.send_message(
-            timeline_text(),ephemeral=True,
-            allowed_mentions=discord.AllowedMentions.none())
+            timeline_text(),view=TimelineMenu(interaction.user.id),
+            ephemeral=True,allowed_mentions=discord.AllowedMentions.none())
 
     @discord.ui.button(label="Scheduled Messages",emoji="📋",style=discord.ButtonStyle.secondary,
                        custom_id="guildkeeper:scheduler:messages",row=0)
@@ -149,6 +151,29 @@ class Private(discord.ui.View):
                 "Only the moderator who opened this menu can use it.",ephemeral=True)
             return False
         return True
+
+
+class TimelineMenu(Private):
+    def __init__(self,owner,page=0):
+        super().__init__(owner)
+        self.page=max(0,page)
+
+    @discord.ui.button(label="Previous Page",emoji="⬅️",style=discord.ButtonStyle.secondary)
+    async def previous(self,interaction,button):
+        page=max(0,self.page-1)
+        await interaction.response.edit_message(
+            content=timeline_text(page),view=TimelineMenu(self.owner,page),
+            allowed_mentions=discord.AllowedMentions.none())
+
+    @discord.ui.button(label="Next Page",emoji="➡️",style=discord.ButtonStyle.secondary)
+    async def next(self,interaction,button):
+        page=self.page+1
+        if not core.timeline(limit=120)[page*10:(page+1)*10]:
+            return await interaction.response.send_message(
+                "You are on the final page.",ephemeral=True)
+        await interaction.response.edit_message(
+            content=timeline_text(page),view=TimelineMenu(self.owner,page),
+            allowed_mentions=discord.AllowedMentions.none())
 
 
 class AutomationSelect(discord.ui.Select):
