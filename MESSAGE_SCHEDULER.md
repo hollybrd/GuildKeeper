@@ -29,7 +29,9 @@ GuildKeeper now has a staff-only, persistent **Message Scheduler** dashboard.
 | New Shopify product | New online product detected by polling | Follows SHOPIFY_AUTO_ANNOUNCE environment switch (off initially) |
 | Shopify sale/price reduction | Reduced product price detected by polling | Follows SHOPIFY_AUTO_ANNOUNCE environment switch (off initially) |
 
-You can choose a text channel and customize the announcement title and opening text. The event-specific text is still added, so quest and leaderboard details are preserved. New rules do not post instantly.
+You can choose a text channel, customize the announcement title and opening text, and toggle **Ping @GuildBlast** on or off for each automation. This defaults to **off**, including existing automations after the database migration. The event-specific text is still added, so quest and leaderboard details are preserved. New rules do not post instantly.
+
+**Ping permissions:** GuildKeeper must have permission to mention the configured `GUILD_BLAST_ROLE_ID`. Either the role must be mentionable or the bot must have permission to mention roles. If the permission is missing, GuildKeeper will show an error before saving, or record a delivery issue if the permission changes later. The ping appears in the Discord message body, because role mentions in embeds do not notify members. Only @GuildBlast can be mentioned, never @everyone or @here.
 
 **Automations** lets you inspect all rules and edit text, change destination, pause/resume, or remove a custom rule. Pausing stops future event sends without deleting historic posts. **Deleting a custom rule restores the default**, including its original enabled state. Pause an automation instead of deleting it to ensure it stays disabled.
 
