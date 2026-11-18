@@ -1,6 +1,7 @@
 """Order XP panel storage and moderator review regression tests."""
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 
 import bot
@@ -282,6 +283,211 @@ class PurchaseMilestoneTests(unittest.TestCase):
         bot.setup_db()
         self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, 'test-1002')[0], 'approved')
         self.assertEqual(bot.get_xp(self.gid, self.uid), 250)
+
+    def test_streak_resets_on_missed_week_and_pause_preserves_count(self):
+        from datetime import timedelta
+        from unittest.mock import patch
+        # Timeline from the user: 1 2 3 complete, 4 missed,
+        # 5 complete, 6 paused, 7 complete = 2-week streak.
+        now_week = bot.week_start()
+        first = now_week - timedelta(weeks=6)
+        def key(n):
+            return (first + timedelta(weeks=n - 1)).date().isoformat()
+        with bot.connect() as db:
+            for n in (1, 2, 3, 5, 7):
+                db.execute(
+                    'INSERT INTO weekly_completions VALUES (?,?,?,?)',
+                    (self.gid, self.uid, key(n), bot.utc_now().isoformat()))
+            db.execute('INSERT INTO pauses VALUES (?,?,?,?)',
+                       (self.gid, self.uid, key(6), bot.utc_now().isoformat()))
+        with patch.object(bot, 'week_start', return_value=now_week):
+            self.assertEqual(bot.active_streak(self.gid, self.uid), 2)
+            self.assertEqual(bot.longest_streak(self.gid, self.uid), 3)
+            # Paused week protects, but does not increase count.
+            self.assertEqual(bot.award_earned_streak_milestones(self.gid, self.uid), [])
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
+
+    def test_inactivity_penalty_requires_zero_weekly_objectives(self):
+        wk = bot.week_key()
+        with bot.connect() as db:
+            self.assertTrue(bot.week_needs_inactivity_penalty(
+                db, self.gid, self.uid, wk))
+            db.execute(
+                'INSERT INTO weekly_actions VALUES (?,?,?,?,?,?,?,?)',
+                (self.gid, self.uid, wk, 'gym', wk, 901, 'test-gym',
+                 bot.utc_now().isoformat()))
+            self.assertFalse(bot.week_needs_inactivity_penalty(
+                db, self.gid, self.uid, wk))
+            # Pressing the Turn In button is not needed to avoid the fine.
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM weekly_completions WHERE guild_id=? AND user_id=?',
+                (self.gid, self.uid)).fetchone()[0], 0)
+        next_week = (bot.week_start() + timedelta(weeks=1)).date().isoformat()
+        with bot.connect() as db:
+            db.execute('INSERT INTO pauses VALUES (?,?,?,?)',
+                       (self.gid, self.uid, next_week, bot.utc_now().isoformat()))
+            self.assertFalse(bot.week_needs_inactivity_penalty(
+                db, self.gid, self.uid, next_week))
+            db.execute('INSERT INTO resumed_pauses VALUES (?,?,?,?)',
+                       (self.gid, self.uid, next_week, bot.utc_now().isoformat()))
+            self.assertTrue(bot.week_needs_inactivity_penalty(
+                db, self.gid, self.uid, next_week))
+
+    def test_full_quest_completion_counts_without_pressing_turn_in(self):
+        # A finished week is stored independently of the Discord Turn In button.
+        with bot.connect() as db:
+            wk = bot.week_key()
+            db.execute(
+                'INSERT INTO weekly_completions VALUES (?,?,?,?)',
+                (self.gid, self.uid, wk, bot.utc_now().isoformat()))
+        self.assertEqual(bot.active_streak(self.gid, self.uid), 1)
+        self.assertEqual(bot.award_earned_streak_milestones(self.gid, self.uid), [])
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
+
+    def test_admin_credited_streak_weeks_unlock_milestone_rewards(self):
+        from datetime import timedelta
+        start = bot.week_start()
+        with bot.connect() as db:
+            for i in range(12):
+                wk = (start - timedelta(weeks=i)).date().isoformat()
+                db.execute('INSERT INTO admin_streak_weeks VALUES (?,?,?,?)',
+                           (self.gid, self.uid, wk, bot.utc_now().isoformat()))
+        new = bot.award_earned_streak_milestones(self.gid, self.uid)
+        self.assertEqual(new, ['streak4', 'streak8', 'streak12'])
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 75 + 125 + 175)
+        self.assertEqual(bot.award_earned_streak_milestones(self.gid, self.uid), [])
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 375)
+        self.assertEqual(bot.milestone_progress(self.gid, self.uid)['completed'], 3)
+
+    def test_previous_admin_streak_credits_are_backfilled_and_stay_earned(self):
+        from datetime import timedelta
+        start = bot.week_start() - timedelta(weeks=13)
+        with bot.connect() as db:
+            for i in range(8):
+                wk = (start - timedelta(weeks=i)).date().isoformat()
+                db.execute('INSERT INTO admin_streak_weeks VALUES (?,?,?,?)',
+                           (self.gid, self.uid, wk, bot.utc_now().isoformat()))
+        self.assertEqual(bot.active_streak(self.gid, self.uid), 0)
+        self.assertEqual(bot.backfill_earned_streak_milestones(self.gid), 2)
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 200)
+        self.assertEqual(bot.backfill_earned_streak_milestones(self.gid), 0)
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 200)
+
+    def test_pauses_preserve_but_do_not_add_streak_milestone_weeks(self):
+        from datetime import timedelta
+        start = bot.week_start()
+        with bot.connect() as db:
+            for i in (0, 1, 3, 4):
+                wk = (start - timedelta(weeks=i)).date().isoformat()
+                db.execute('INSERT INTO admin_streak_weeks VALUES (?,?,?,?)',
+                           (self.gid, self.uid, wk, bot.utc_now().isoformat()))
+            paused = (start - timedelta(weeks=2)).date().isoformat()
+            db.execute('INSERT INTO pauses VALUES (?,?,?,?)',
+                       (self.gid, self.uid, paused, bot.utc_now().isoformat()))
+        self.assertEqual(bot.longest_streak(self.gid, self.uid), 4)
+        self.assertEqual(bot.award_earned_streak_milestones(self.gid, self.uid), ['streak4'])
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 75)
+
+    def test_reset_does_not_reimport_historical_order_on_restart(self):
+        with bot.connect() as db:
+            db.execute(
+                'INSERT INTO pending_milestones(guild_id,user_id,kind,evidence,status,created_at) '
+                "VALUES (?,?, 'purchase1', ?, 'pending', ?)",
+                (self.gid, self.uid, '#historic1001', bot.utc_now().isoformat()),
+            )
+        bot.setup_db()
+        self.assertEqual(bot.order_submission_status(self.gid, self.uid), 'pending')
+        self.assertEqual(bot.reset_milestone_test_data(
+            self.gid, self.uid, 'order')['orders_archived'], 1)
+        bot.setup_db()
+        self.assertEqual(bot.order_submission_status(self.gid, self.uid), 'available')
+        self.assertEqual(bot.purchase_order_summary(self.gid, self.uid)['pending'], 0)
+        self.assertEqual(bot.submit_purchase_order(
+            self.gid, self.uid, '#historic1001')[0], 'submitted')
+
+    def test_admin_reset_order_reverses_xp_preserves_audit_and_can_retest_same_reference(self):
+        other = self.uid + 1
+        status, order_id = bot.submit_purchase_order(self.gid, self.uid, '#9001')
+        self.assertEqual(status, 'submitted')
+        self.assertEqual(bot.review_purchase_order(self.gid, order_id, 1, True)[0], 'awarded')
+        with bot.connect() as db:
+            db.execute('INSERT INTO reward_tickets(guild_id,user_id,rank,status) VALUES (?,?,?,?)',
+                       (self.gid, self.uid, 'Master', 'fulfilled'))
+            db.execute('INSERT INTO members(guild_id,user_id,xp) VALUES (?,?,?)',
+                       (self.gid, other, 400))
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 250)
+        result = bot.reset_milestone_test_data(self.gid, self.uid, 'order')
+        self.assertEqual(result['order'], 1)
+        self.assertEqual(result['xp_reversed'], 250)
+        self.assertEqual(result['orders_archived'], 1)
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
+        self.assertEqual(bot.get_xp(self.gid, other), 400)
+        self.assertEqual(bot.order_submission_status(self.gid, self.uid), 'available')
+        self.assertEqual(bot.review_purchase_order(self.gid, order_id, 1, True)[0], 'not_pending')
+        self.assertEqual(bot.purchase_order_summary(self.gid, self.uid)['approved'], 0)
+        with bot.connect() as db:
+            old = db.execute('SELECT status,order_reference FROM purchase_orders WHERE id=?',
+                             (order_id,)).fetchone()
+            self.assertEqual(old['status'], 'test_reset')
+            self.assertIn('#9001', old['order_reference'])
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM reward_tickets WHERE guild_id=? AND user_id=?',
+                (self.gid, self.uid)).fetchone()[0], 1)
+        self.assertEqual(bot.reset_milestone_test_data(self.gid, self.uid, 'order')['xp_reversed'], 0)
+        status, new_id = bot.submit_purchase_order(self.gid, self.uid, '#9001')
+        self.assertEqual(status, 'submitted')
+        self.assertNotEqual(new_id, order_id)
+        self.assertEqual(bot.review_purchase_order(self.gid, new_id, 1, True)[0], 'awarded')
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 250)
+        # Most recent award, not two historical test cycles.
+        self.assertEqual(bot.purchase_order_summary(self.gid, self.uid)['earned_xp'], 250)
+
+    def test_admin_reset_boost_reverses_xp_and_allows_reaward(self):
+        with bot.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            bot.grant_once(db, 'milestone_claims', self.gid, self.uid, 'boost1', 50)
+        result = bot.reset_milestone_test_data(self.gid, self.uid, 'boost')
+        self.assertEqual(result['boost'], 1)
+        self.assertEqual(result['xp_reversed'], 50)
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
+        self.assertNotIn('boost1', bot.milestone_progress(self.gid, self.uid)['claimed'])
+        with bot.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.assertTrue(bot.grant_once(db, 'milestone_claims', self.gid, self.uid,
+                                           'boost1', bot.MILESTONE_XP['boost1']))
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 100)
+        self.assertIn('100 XP granted', bot.boost_milestone_message(self.gid, self.uid, True))
+
+    def test_admin_reset_both_reverses_completion_but_preserves_other_milestones(self):
+        kinds = dict((kind, xp) for kind, _, xp, _ in bot.MILESTONE_QUESTS)
+        with bot.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            for kind, amount in kinds.items():
+                self.assertTrue(bot.grant_once(db, 'milestone_claims', self.gid, self.uid, kind, amount))
+        initial = sum(kinds.values()) + bot.MILESTONE_COMPLETION_BONUS
+        self.assertEqual(bot.get_xp(self.gid, self.uid), initial)
+        result = bot.reset_milestone_test_data(self.gid, self.uid, 'both')
+        self.assertEqual((result['order'], result['boost'], result['completion']), (1, 1, 1))
+        self.assertEqual(result['xp_reversed'], 250 + 100 + 500)
+        self.assertEqual(bot.get_xp(self.gid, self.uid), initial - 850)
+        claimed = bot.milestone_progress(self.gid, self.uid)['claimed']
+        self.assertEqual(claimed, set(kinds) - {'purchase1', 'boost1'})
+        bot.setup_db()
+        self.assertEqual(bot.get_xp(self.gid, self.uid), initial - 850)
+        self.assertFalse(bot.milestone_progress(self.gid, self.uid)['bonus_earned'])
+
+    def test_admin_reset_is_scoped_and_does_not_clear_unrelated_order_requests(self):
+        other = self.uid + 1
+        _, first = bot.submit_purchase_order(self.gid, self.uid, 'self-order')
+        _, other_id = bot.submit_purchase_order(self.gid, other, 'other-order')
+        result = bot.reset_milestone_test_data(self.gid, self.uid, 'order')
+        self.assertEqual(result['orders_archived'], 1)
+        self.assertEqual(bot.review_purchase_order(self.gid, first, 1, True)[0], 'not_pending')
+        self.assertEqual(bot.order_submission_status(self.gid, other), 'pending')
+        self.assertEqual(bot.review_purchase_order(self.gid, other_id, 1, True)[0], 'awarded')
+        self.assertEqual(bot.get_xp(self.gid, other), 250)
+        with self.assertRaises(ValueError):
+            bot.reset_milestone_test_data(self.gid, self.uid, 'all')
 
     def test_legacy_pending_purchase_is_migrated_without_awarding_xp(self):
         with bot.connect() as db:

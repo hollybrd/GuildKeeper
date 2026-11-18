@@ -210,7 +210,11 @@ def streak_weeks(gid, uid):
     with connect() as db:
         completed = {r['week_key'] for r in db.execute('SELECT week_key FROM weekly_completions WHERE guild_id=? AND user_id=?', (gid,uid))}
         completed |= {r['week_key'] for r in db.execute('SELECT week_key FROM admin_streak_weeks WHERE guild_id=? AND user_id=?', (gid,uid))}
-        paused = {r['week_key'] for r in db.execute('SELECT week_key FROM pauses WHERE guild_id=? AND user_id=?', (gid,uid))}
+        paused = {r['week_key'] for r in db.execute(
+            'SELECT p.week_key FROM pauses p WHERE p.guild_id=? AND p.user_id=? '
+            'AND NOT EXISTS (SELECT 1 FROM resumed_pauses r '
+            'WHERE r.guild_id=p.guild_id AND r.user_id=p.user_id AND r.week_key=p.week_key)',
+            (gid, uid))}
     return completed, paused
 
 def active_streak(gid, uid):
@@ -765,13 +769,16 @@ async def admin_streak_add(interaction: discord.Interaction, member: discord.Mem
             result = db.execute('INSERT OR IGNORE INTO admin_streak_weeks VALUES (?,?,?,?)',
                                 (interaction.guild_id,member.id,key,utc_now().isoformat()))
             added += result.rowcount
+    milestones = award_earned_streak_milestones(interaction.guild_id, member.id)
     await update_rank(member, get_xp(interaction.guild_id, member.id))
     await interaction.followup.send(
         f'🔥 Credited **{added}** additional streak week(s) to {member.mention} '
         f'(requested {weeks} consecutive weeks, ending this week). '
         f'Active streak: **{active_streak(interaction.guild_id,member.id)}** weeks. '
         f'Rank: **{rank_for(get_xp(interaction.guild_id,member.id),interaction.guild_id,member.id)}**. '
-        'No XP or quest objectives were awarded.', ephemeral=True)
+        + (f'Unlocked **{len(milestones)}** streak milestone(s) with their one-time XP rewards.'
+           if milestones else 'No new streak milestone rewards were due.'),
+        ephemeral=True)
 
 def reset_rank_test_data(gid: int, uid: int) -> int:
     """Reset the member's rank testing progress to permanent Novice.
@@ -1023,6 +1030,125 @@ def grant_once(db, table, gid, uid, kind, amount):
     return False
 
 
+def reset_milestone_test_data(gid: int, uid: int, target: str) -> dict:
+    """Undo this member's current test milestone rewards without touching others.
+
+    Preserve order and XP audit history. Old review cards become inert because
+    the order rows no longer have 'pending' status. The one-time completion
+    bonus is also reversed if a prerequisite milestone is reset.
+    """
+    if target not in ('order', 'boost', 'both'):
+        raise ValueError('Choose order, boost or both')
+    kinds = (('purchase1', 'boost1') if target == 'both' else
+             ('purchase1',) if target == 'order' else ('boost1',))
+    result = {'order': 0, 'boost': 0, 'completion': 0, 'xp_reversed': 0, 'orders_archived': 0}
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        existing = {row['kind'] for row in db.execute(
+            "SELECT kind FROM milestone_claims WHERE guild_id=? AND user_id=?",
+            (gid, uid),
+        )}
+        to_reset = [kind for kind in kinds if kind in existing]
+        if to_reset and 'guild_completion' in existing:
+            to_reset.append('guild_completion')
+        for kind in to_reset:
+            # The claim is unique but the XP log is append-only across earlier
+            # admin resets, so reverse only its most recent matching award.
+            previous = db.execute(
+                "SELECT amount FROM xp_log WHERE guild_id=? AND user_id=? "
+                "AND reason=? AND amount>0 ORDER BY id DESC LIMIT 1",
+                (gid, uid, kind),
+            ).fetchone()
+            amount = previous['amount'] if previous else 0
+            db.execute(
+                "DELETE FROM milestone_claims WHERE guild_id=? AND user_id=? AND kind=?",
+                (gid, uid, kind),
+            )
+            if amount:
+                add_xp(gid, uid, -amount, f'Admin milestone test reset: {kind}', db)
+                result['xp_reversed'] += amount
+            if kind == 'purchase1':
+                result['order'] = 1
+            elif kind == 'boost1':
+                result['boost'] = 1
+            else:
+                result['completion'] = 1
+        if 'purchase1' in kinds:
+            # Prevent legacy migration on the next startup from resurrecting
+            # imported pending requests under their original order reference.
+            db.execute(
+                "UPDATE pending_milestones SET status='test_reset' "
+                "WHERE guild_id=? AND user_id=? AND kind='purchase1'",
+                (gid, uid),
+            )
+            # Do not destroy verification or moderator history. Archiving
+            # every prior row prevents a stale approval button from granting XP.
+            result['orders_archived'] = db.execute(
+                "UPDATE purchase_orders SET status='test_reset', "
+                "order_reference='[test reset ' || id || '] ' || order_reference "
+                "WHERE guild_id=? AND user_id=? AND status IN ('pending','approved','rejected','cancelled')",
+                (gid, uid),
+            ).rowcount
+    return result
+
+
+@bot.tree.command(
+    name='admin_milestone_test_reset',
+    description='Admin test: reset your own Order XP, Server Boost XP, or both',
+)
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+@app_commands.describe(
+    target='Choose which of YOUR milestone awards to reset',
+    confirm='Must be True to reset your milestone claim and reverse its XP',
+)
+@app_commands.choices(target=[
+    app_commands.Choice(name='Order XP', value='order'),
+    app_commands.Choice(name='Server Boost XP', value='boost'),
+    app_commands.Choice(name='Both', value='both'),
+])
+async def admin_milestone_test_reset(
+    interaction: discord.Interaction, target: app_commands.Choice[str], confirm: bool,
+):
+    if interaction.guild_id != GUILD_ID or not isinstance(interaction.user, discord.Member):
+        return await interaction.response.send_message(
+            'This command is only available inside GYMGUILD.', ephemeral=True)
+    if not confirm:
+        return await interaction.response.send_message(
+            'No changes made. Set **confirm: True** to reset **your own** selected '
+            'milestone claim(s), reverse their recorded XP and (if applicable) '
+            'the +500 XP Main Quest Completion bonus. For Order XP, old '
+            'submission records are archived, not deleted; other progress stays intact. '
+            'For Boost XP, an already-active boost must end before a new boost '
+            'event can automatically award the milestone again.',
+            ephemeral=True,
+        )
+    await interaction.response.defer(ephemeral=True)
+    try:
+        result = reset_milestone_test_data(
+            interaction.guild_id, interaction.user.id, target.value)
+    except sqlite3.Error:
+        log.exception('Could not reset milestone test data for member %s', interaction.user.id)
+        return await interaction.followup.send(
+            'Reset failed: database unchanged by the unsuccessful transaction.',
+            ephemeral=True,
+        )
+    await update_rank(interaction.user, get_xp(interaction.guild_id, interaction.user.id))
+    await interaction.followup.send(
+        f'🧪 **Milestone test reset: {target.name}**\n'
+        f'Order claim cleared: **{"Yes" if result["order"] else "No claim found"}**\n'
+        f'Boost claim cleared: **{"Yes" if result["boost"] else "No claim found"}**\n'
+        f'Main Quest Completion claim reversed: **{"Yes" if result["completion"] else "Not needed"}**\n'
+        f'Historical order requests archived: **{result["orders_archived"]}**\n'
+        f'XP reversed: **{result["xp_reversed"]}**\n\n'
+        'New Order XP requests can now be tested through Milestone Quests. '
+        'To re-test automatic boost XP, Discord must emit a new boost-start '
+        'event (an existing active boost does not trigger it).',
+        ephemeral=True,
+    )
+
+
 def longest_streak(gid: int, uid: int) -> int:
     """Longest run of completed weeks, including admin credits; pauses preserve runs."""
     completed, paused = streak_weeks(gid, uid)
@@ -1040,6 +1166,46 @@ def longest_streak(gid: int, uid: int) -> int:
             current = 0
         cursor += timedelta(days=7)
     return best
+
+
+STREAK_MILESTONE_THRESHOLDS = (
+    (4, 'streak4'),
+    (8, 'streak8'),
+    (12, 'streak12'),
+)
+
+
+def award_earned_streak_milestones(gid: int, uid: int) -> list[str]:
+    """Recognize consecutive credited or completed weeks, exactly once.
+
+    Admin-added streak weeks count as completions, just like the rank streak
+    display. Historical consecutive records count even after a streak breaks.
+    Pauses protect a run without increasing its length.
+    """
+    longest = longest_streak(gid, uid)
+    awarded = []
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        for needed, kind in STREAK_MILESTONE_THRESHOLDS:
+            if longest >= needed and grant_once(
+                db, 'milestone_claims', gid, uid, kind, MILESTONE_XP[kind]
+            ):
+                awarded.append(kind)
+    return awarded
+
+
+def backfill_earned_streak_milestones(gid: int) -> int:
+    """Repair earlier admin streak credits without touching member records."""
+    with connect() as db:
+        members = db.execute(
+            'SELECT user_id FROM ('
+            'SELECT user_id FROM admin_streak_weeks WHERE guild_id=? '
+            'UNION SELECT user_id FROM weekly_completions WHERE guild_id=?'
+            ') ORDER BY user_id',
+            (gid, gid),
+        ).fetchall()
+    return sum(len(award_earned_streak_milestones(gid, row['user_id']))
+               for row in members)
 
 
 def reward_eligibility_text(gid: int, uid: int) -> str:
@@ -1104,6 +1270,7 @@ async def credit_action(message, kind, xp, fingerprint):
         add_xp(gid,uid,xp,'Weekly '+wk+' '+kind,db)
         grant_once(db,'starter_claims',gid,uid,'first_steps',10)
         kinds = {r['kind'] for r in db.execute('SELECT kind FROM weekly_actions WHERE guild_id=? AND user_id=? AND week_key=?',(gid,uid,wk))}
+        completed_now = False
         if len(kinds) == 4:
             finished = db.execute('INSERT OR IGNORE INTO weekly_completions VALUES (?,?,?,?)',
                                   (gid,uid,wk,utc_now().isoformat()))
@@ -1111,7 +1278,12 @@ async def credit_action(message, kind, xp, fingerprint):
                 add_xp(gid,uid,50,'Weekly completion '+wk,db)
                 grant_once(db,'milestone_claims',gid,uid,'first_week',MILESTONE_XP['first_week'])
                 n = db.execute('SELECT COUNT(*) n FROM weekly_completions WHERE guild_id=? AND user_id=?',(gid,uid)).fetchone()['n']
-                # Milestones for cumulative weekly completions; streak-based awards are handled at reset.
+                # A full set is automatically turned in: the button simply confirms completion.
+                completed_now = True
+    if completed_now:
+        # After committing the weekly completion, use the same streak rules
+        # as rank progression (including admin credits and protected pauses).
+        award_earned_streak_milestones(gid, uid)
     await update_rank(message.author,get_xp(gid,uid))
     try:
         await message.add_reaction('✦')
@@ -1145,6 +1317,23 @@ async def on_message(message: discord.Message):
         await credit_action(message,'hobby',25,fingerprint)
 
 
+def week_needs_inactivity_penalty(db, gid: int, uid: int, wk: str) -> bool:
+    """A week is inactive only if NONE of its four objectives was recorded."""
+    paused = db.execute(
+        'SELECT 1 FROM pauses p WHERE p.guild_id=? AND p.user_id=? AND p.week_key=? '
+        'AND NOT EXISTS (SELECT 1 FROM resumed_pauses r '
+        'WHERE r.guild_id=p.guild_id AND r.user_id=p.user_id AND r.week_key=p.week_key)',
+        (gid, uid, wk),
+    ).fetchone()
+    if paused:
+        return False
+    return db.execute(
+        "SELECT 1 FROM weekly_actions WHERE guild_id=? AND user_id=? AND week_key=? "
+        "AND kind IN ('training1','training2','gym','hobby') LIMIT 1",
+        (gid, uid, wk),
+    ).fetchone() is None
+
+
 async def settle_previous_weeks():
     guild = bot.get_guild(GUILD_ID)
     if guild is None:
@@ -1168,25 +1357,11 @@ async def settle_previous_weeks():
                 db.execute('BEGIN IMMEDIATE')
                 inserted = db.execute('INSERT OR IGNORE INTO weekly_settlements VALUES (?,?,?,?)',(GUILD_ID,uid,wk,utc_now().isoformat()))
                 if inserted.rowcount:
-                    paused = db.execute('SELECT 1 FROM pauses WHERE guild_id=? AND user_id=? AND week_key=?',(GUILD_ID,uid,wk)).fetchone()
-                    trained = db.execute('SELECT 1 FROM weekly_actions WHERE guild_id=? AND user_id=? AND week_key=? AND kind IN ("training1","training2")',(GUILD_ID,uid,wk)).fetchone()
-                    if not paused and not trained:
+                    if week_needs_inactivity_penalty(db, GUILD_ID, uid, wk):
                         add_xp(GUILD_ID,uid,-25,'Inactive week '+wk,db)
                         changed = True
-                    # Streak milestones only after consecutive completed cycles.
-                    if not paused and db.execute('SELECT 1 FROM weekly_completions WHERE guild_id=? AND user_id=? AND week_key=?',(GUILD_ID,uid,wk)).fetchone():
-                        n = 0
-                        day = cursor
-                        for _ in range(12):
-                            key = day.date().isoformat()
-                            if db.execute('SELECT 1 FROM weekly_completions WHERE guild_id=? AND user_id=? AND week_key=?',(GUILD_ID,uid,key)).fetchone():
-                                n += 1
-                            elif not db.execute('SELECT 1 FROM pauses WHERE guild_id=? AND user_id=? AND week_key=?',(GUILD_ID,uid,key)).fetchone():
-                                break
-                            day -= timedelta(days=7)
-                        if n >= 4: changed |= grant_once(db,'milestone_claims',GUILD_ID,uid,'streak4',MILESTONE_XP['streak4'])
-                        if n >= 8: changed |= grant_once(db,'milestone_claims',GUILD_ID,uid,'streak8',MILESTONE_XP['streak8'])
-                        if n >= 12: changed |= grant_once(db,'milestone_claims',GUILD_ID,uid,'streak12',MILESTONE_XP['streak12'])
+                    # Streak milestones are claimed when week 4/8/12 completes.
+                    # The startup backfill handles historical missing claims.
             cursor += timedelta(days=7)
         if changed:
             member = guild.get_member(uid)
@@ -1232,18 +1407,35 @@ class WeeklyTurnInView(discord.ui.View):
                 'Use `/weekly_progress` to see what remains.',
                 ephemeral=True)
             return
+        # Completing all four tasks already auto-recorded the turn-in and
+        # credited XP; the button gives confirmation without rewarding twice.
+        with connect() as db:
+            recorded = db.execute(
+                'SELECT 1 FROM weekly_completions WHERE guild_id=? AND user_id=? AND week_key=?',
+                (interaction.guild_id, interaction.user.id, wk),
+            ).fetchone() is not None
+        if not recorded:
+            return await interaction.response.send_message(
+                'All four objectives are recorded, but the weekly completion is still '
+                'being processed. Refresh your progress and try again.', ephemeral=True)
         streak = weekly_streak_with_current(interaction.guild_id, interaction.user.id, wk)
         await interaction.response.send_message(
             '🏆 **Congratulations! Weekly Side Quest complete!** '
-            'You have completed all 4 objectives and earned your weekly completion bonus. '
-            f'🔥 **Your weekly streak: {streak} week(s)!**',
+            'All four objectives have been **automatically turned in**, and your '
+            'weekly completion bonus has already been awarded. '
+            f'🔥 **Your current streak: {streak} week(s)!** '
+            'You do not need to press Turn In to keep your streak.',
             ephemeral=True)
 
 
 def weekly_progress_text(gid: int, uid: int) -> str:
     kinds = weekly_status(gid, uid, week_key())
     lines = [f'{"✅" if key in kinds else "⬜"} {name}' for key, name in WEEKLY_OBJECTIVES]
-    return '⚔️ **Your Weekly Side Quest**\n' + '\n'.join(lines) + f'\n**{len(kinds)}/4 objectives completed.**'
+    complete = len(kinds) == 4
+    return ('⚔️ **Your Weekly Side Quest**\n' + '\n'.join(lines) +
+            f'\n**{len(kinds)}/4 objectives completed.**\n' +
+            ('🏆 **Automatically turned in!** Your completed week counts toward your streak.'
+             if complete else 'Complete all four to turn in automatically — no button required.'))
 
 
 @bot.tree.command(name='weekly_progress',description='See your four weekly quest objectives')
@@ -1277,7 +1469,7 @@ async def pause_status(interaction:discord.Interaction):
 
 @bot.tree.command(name='streak',description='See your consecutive weekly completions')
 async def streak(interaction:discord.Interaction):
-    await reply(interaction,f'🔥 Completed weekly trials: **{completed_weeks(interaction.guild_id,interaction.user.id)}**\nCurrent closed-week streak: **{streak_length(interaction.guild_id,interaction.user.id)}**. Paused weeks preserve but do not increase it.')
+    await reply(interaction,f'🔥 Completed weekly trials: **{completed_weeks(interaction.guild_id,interaction.user.id)}**\nCurrent streak (including this week if complete): **{active_streak(interaction.guild_id,interaction.user.id)}**. Paused weeks preserve but do not increase it.')
 
 
 
@@ -1784,10 +1976,12 @@ def purchase_order_summary(gid: int, uid: int) -> dict:
             (gid, uid),
         ).fetchone() is not None
         actual = db.execute(
-            "SELECT SUM(amount) AS total FROM xp_log "
-            "WHERE guild_id=? AND user_id=? AND reason='purchase1'",
+            "SELECT amount FROM xp_log "
+            "WHERE guild_id=? AND user_id=? AND reason='purchase1' AND amount>0 "
+            "ORDER BY id DESC LIMIT 1",
             (gid, uid),
-        ).fetchone()['total']
+        ).fetchone()
+        actual = actual['amount'] if actual else 0
     return {
         'approved': sum(row['status'] == 'approved' for row in records),
         'pending': sum(row['status'] == 'pending' for row in records),
@@ -1825,7 +2019,7 @@ def order_xp_embed(gid: int, uid: int) -> discord.Embed:
         inline=False,
     )
     if summary['orders']:
-        status_icons = {'approved': '✅', 'pending': '⏳', 'rejected': '❌', 'cancelled': '🚫'}
+        status_icons = {'approved': '✅', 'pending': '⏳', 'rejected': '❌', 'cancelled': '🚫', 'test_reset': '🧪'}
         lines = [
             f"{status_icons.get(order['status'], '•')} "
             f"`{discord.utils.escape_markdown(order['order_reference'])}` — "
@@ -2072,11 +2266,12 @@ def boost_milestone_message(gid: int, uid: int, currently_boosting: bool) -> str
     if awarded:
         with connect() as db:
             total = db.execute(
-                "SELECT SUM(amount) AS total FROM xp_log "
-                "WHERE guild_id=? AND user_id=? AND reason='boost1'",
+                "SELECT amount FROM xp_log "
+                "WHERE guild_id=? AND user_id=? AND reason='boost1' AND amount>0 "
+                "ORDER BY id DESC LIMIT 1",
                 (gid, uid),
-            ).fetchone()['total']
-        amount = f'{total} XP granted' if total is not None else 'XP reward claimed'
+            ).fetchone()
+        amount = f'{total["amount"]} XP granted' if total else 'XP reward claimed'
         return (
             f'💎 **Boost milestone complete — {amount}!** '
             'Thank you for supporting GYMGUILD and helping our community grow. ✦'
@@ -2805,7 +3000,7 @@ def weekly_board_embed():
     embed.add_field(name='​', value='​', inline=False)
     embed.add_field(name='🏆 Completion bonus — 50 XP', value='Complete all four objectives to claim the bonus automatically.', inline=False)
     embed.add_field(name='━━━━━━━━━━━━━━━━━━━━', value='**Your progress & information**', inline=False)
-    embed.add_field(name='Track your progress', value='Use the **Turn In Quest** button below for a private progress check, or `/weekly_progress`, `/streak`, `/pause_status`. Messages must be meaningful (at least 25 characters and 5 words). **Quest progress updates automatically** as qualifying messages are posted.', inline=False)
+    embed.add_field(name='Track your progress', value='Complete all four objectives to **automatically turn in your weekly quest** and advance your streak. The **Turn In Quest** button confirms your completion and shows your streak. Use **View Progress**, `/weekly_progress`, `/streak` or `/pause_status`. Messages must be meaningful (at least 25 characters and 5 words).', inline=False)
     embed.add_field(name='Next reset', value=f'<t:{int(reset.timestamp())}:F> · <t:{int(reset.timestamp())}:R>', inline=False)
     embed.set_footer(text=f'Guildkeeper Weekly Side Quest • {week_key()}')
     return embed
@@ -2958,7 +3153,7 @@ def profile_progress_text(gid: int, uid: int, display_name: str) -> str:
 def streak_progress_text(gid: int, uid: int) -> str:
     return (
         f'🔥 **Your Weekly Streak** — Completed weeks: **{completed_weeks(gid, uid)}** '
-        f'· Current closed-week streak: **{streak_length(gid, uid)}**. '
+        f'· Current streak: **{active_streak(gid, uid)}**. '
         'Paused weeks preserve but do not increase your streak.'
     )
 
@@ -3326,6 +3521,8 @@ async def on_ready():
         return
     startup_synced = True
     try:
+        awarded = backfill_earned_streak_milestones(GUILD_ID)
+        log.info('Startup backfilled %s missed streak milestones', awarded)
         success, failed = await sync_all_ranks(guild)
         log.info('Startup rank sync complete: %s successful, %s failed', success, failed)
         await settle_previous_weeks()
