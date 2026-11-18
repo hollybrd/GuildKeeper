@@ -472,10 +472,13 @@ async def run_existing_command(interaction, action, target_id, weeks=None, rank=
 
 
 class ConfirmCheat(Private):
-    def __init__(self, owner_id, target_id, action, weeks=None, rank=None):
+    def __init__(self, owner_id, target_id, action, weeks=None, rank=None,
+                 reason=None, snapshot=None):
         super().__init__(owner_id)
         self.target_id, self.action = target_id, action
         self.weeks, self.rank = weeks, rank
+        self.reason = reason or 'Admin testing action'
+        self.snapshot = snapshot
         self.used = False
 
     @discord.ui.button(label='Confirm Test Action', emoji='✅', style=discord.ButtonStyle.danger)
@@ -483,14 +486,22 @@ class ConfirmCheat(Private):
         if self.used:
             return await interaction.response.send_message('Already submitted.', ephemeral=True)
         self.used = True
-        # The existing callback acknowledges the interaction and reports its own result.
+        # Check for stale previews before destructive changes.
         try:
+            if self.snapshot is not None:
+                _, current = admin_action_safety.impact(
+                    api, interaction.guild_id, self.target_id, self.action, rank=self.rank)
+                if current != self.snapshot:
+                    return await interaction.response.send_message(
+                        '⚠️ These records changed since the preview. No action taken. '
+                        'Reopen the reset to review current values.', ephemeral=True)
             await run_existing_command(interaction, self.action, self.target_id,
                                        weeks=self.weeks, rank=self.rank)
             api.admin_hub.audit(interaction.user.id, 'testing_' + self.action,
                                 'Target ' + str(self.target_id)
                                 + (' weeks=' + str(self.weeks) if self.weeks else '')
-                                + (' rank=' + self.rank if self.rank else ''),
+                                + (' rank=' + self.rank if self.rank else '')
+                                + '; reason=' + self.reason,
                                 self.target_id)
         except (ValueError, discord.NotFound, discord.Forbidden, discord.HTTPException) as error:
             if interaction.response.is_done():
