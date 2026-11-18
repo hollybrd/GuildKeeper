@@ -113,6 +113,16 @@ class TestingCheatsView(discord.ui.View):
             'This affects YOUR own account only.',
             view=MilestoneTargetView(interaction.user.id), ephemeral=True)
 
+    @discord.ui.button(label='Test Runner', emoji='🧪', style=discord.ButtonStyle.success,
+                       custom_id='guildkeeper:testing:runner', row=3)
+    async def test_runner(self, interaction, button):
+        await interaction.response.send_message(
+            '🧪 **Live Test Runner**\nSelect your separate non-admin testing account. '
+            'The runner reads member progress and records your manual pass/fail results. '
+            '**It will never alter quest progress or grant XP automatically.**',
+            view=api.test_runner.TestMemberPicker(interaction.user.id),
+            ephemeral=True)
+
     @discord.ui.button(label='All Test Commands', emoji='📋', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:testing:commands', row=2)
     async def commands(self, interaction, button):
@@ -162,6 +172,7 @@ def embed():
         colour=discord.Colour.orange())
     e.add_field(name='XP & Progress', value='Complete Quest (test-only) · Award/remove XP · Starter reset · Weekly reset · Add/remove credited streak weeks', inline=False)
     e.add_field(name='Advanced', value='Pause history reset · Self-only rank/milestone resets · Rank reward reset', inline=False)
+    e.add_field(name='Live QA', value='Test Runner · Select test account · Read-only progress checks · 18 guided live scenarios and pass/fail report', inline=False)
     e.add_field(name='Safety', value='All actions require Manage Server. Destructive actions need confirmation. '
                 'Existing admin commands are preserved.', inline=False)
     return e
