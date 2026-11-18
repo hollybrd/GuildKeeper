@@ -444,11 +444,61 @@ class ControlMenu(PrivateMenu):
 
 
 class PanelHealthMenu(PrivateMenu):
-    @discord.ui.button(label='Check Again', emoji='🔄', style=discord.ButtonStyle.primary)
+    @discord.ui.button(label='Check Again', emoji='🔍', style=discord.ButtonStyle.secondary)
     async def refresh(self, interaction, button):
         await interaction.response.defer(ephemeral=True)
         checks = await panel_health.snapshot(api, interaction.guild)
         await interaction.edit_original_response(content=panel_health.render(checks), view=self)
+
+    @discord.ui.button(label='Refresh Panels', emoji='🔄', style=discord.ButtonStyle.primary)
+    async def repair(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)
+        checks = await panel_health.snapshot(api, interaction.guild)
+        needs_refresh = [item for item in checks if item['state'] in ('missing', 'outdated')]
+        if not needs_refresh:
+            return await interaction.followup.send(
+                '✅ No verifiably outdated or missing panels to refresh. '
+                'Unknown/unconfigured panels are never changed automatically.', ephemeral=True)
+        names = '\n'.join('• ' + item['name'] for item in needs_refresh)
+        await interaction.followup.send(
+            '⚠️ **Refresh these permanent panels?**\n'
+            + names + '\n\nExisting messages will be **edited in place** where possible; '
+            'only missing panels will be posted again. '
+            'Panels that cannot be verified will be skipped. '
+            '**No existing panel is deleted unless relocating a role menu.**',
+            view=ConfirmPanelRefresh(self.owner_id), ephemeral=True)
+
+
+class ConfirmPanelRefresh(PrivateMenu):
+    def __init__(self, owner_id):
+        super().__init__(owner_id)
+        self.used = False
+
+    @discord.ui.button(label='Confirm Refresh', emoji='✅', style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        if self.used:
+            return await interaction.response.send_message('Already processed.', ephemeral=True)
+        self.used = True
+        await interaction.response.defer(ephemeral=True)
+        checks = await panel_health.snapshot(api, interaction.guild)
+        results = await panel_health.repair(api, interaction.guild, checks)
+        latest = await panel_health.snapshot(api, interaction.guild)
+        ok_count = sum(ok for ok, _ in results)
+        details = '\n'.join(('✅ ' if ok else '⚠️ ') + info for ok, info in results)
+        if not results:
+            details = 'No missing or outdated panels remained.'
+        audit(interaction.user.id, 'refresh_permanent_panels',
+              str(ok_count) + '/' + str(len(results)) + ' panel updates completed')
+        await interaction.edit_original_response(
+            content=('🔄 **Permanent Panel Refresh**\n'
+                     + details + '\n\n' + panel_health.render(latest))[:3950],
+            view=None, allowed_mentions=discord.AllowedMentions.none())
+
+    @discord.ui.button(label='Cancel', emoji='✖️', style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self.used = True
+        await interaction.response.edit_message(
+            content='Panel refresh cancelled. Nothing changed.', view=None)
 
 
 class ConfirmRankSync(PrivateMenu):
