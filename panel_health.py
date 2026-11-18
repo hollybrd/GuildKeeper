@@ -44,7 +44,7 @@ def _status(label, state, reason, channel=None, message=None):
 
 
 async def _check_message(guild, label, channel_id, message_id, embed=None, view=None,
-                         expected_week=None, role_emoji=None):
+                         role_emoji=None, expected_title=None, required_fragments=None):
     if not channel_id:
         return _status(label, 'setup', 'Channel is not configured')
     channel = guild.get_channel(channel_id)
@@ -64,6 +64,13 @@ async def _check_message(guild, label, channel_id, message_id, embed=None, view=
         not message.embeds or not _same_embed(message.embeds[0], embed)
     ):
         return _status(label, 'outdated', 'Panel content differs from the current version', channel, message)
+    if expected_title and (not message.embeds or message.embeds[0].title != expected_title):
+        return _status(label, 'outdated', 'Panel title differs from the current version', channel, message)
+    if required_fragments and (not message.embeds or any(
+        fragment not in (message.embeds[0].description or '')
+        for fragment in required_fragments
+    )):
+        return _status(label, 'outdated', 'Role choice labels differ from configured roles', channel, message)
     if view is not None and sorted(_button_ids(message)) != sorted(_expected_buttons(view)):
         return _status(label, 'outdated', 'Panel buttons differ from the current version', channel, message)
     if role_emoji is not None:
@@ -99,6 +106,8 @@ async def _weekly_board(api, guild):
     if not isinstance(channel, discord.TextChannel):
         return _status(label, 'setup', 'Weekly quest channel is not configured')
     expected = api.weekly_board_embed()
+    if guild.me is None:
+        return _status(label, 'unknown', 'GuildKeeper bot identity unavailable')
     try:
         async for message in channel.history(limit=100):
             if not message.embeds or message.author.id != guild.me.id:
@@ -160,7 +169,8 @@ async def snapshot(api, guild):
     leaderboard_id = _parse_location(
         _saved_config(api, f'leaderboard-post-{gid}'), api.LEADERBOARD_CHANNEL_ID)[1]
     leaderboard = await _check_message(
-        guild, 'Leaderboard', api.LEADERBOARD_CHANNEL_ID, leaderboard_id)
+        guild, 'Leaderboard', api.LEADERBOARD_CHANNEL_ID, leaderboard_id,
+        expected_title='🏆 GYMGUILD — LEADERBOARD')
     if leaderboard['state'] == 'current':
         # Leaderboard fields are live data and expected to change; the bot refreshes
         # it daily. A recorded refresh date is the accurate freshness criterion.
@@ -181,7 +191,9 @@ async def snapshot(api, guild):
             continue
         result = await _check_message(
             guild, label, row['channel_id'] if row else api.GET_ROLE_CHANNEL_ID,
-            row['message_id'] if row else None, role_emoji=emoji)
+            row['message_id'] if row else None, role_emoji=emoji,
+            expected_title=('⚔️ CHOOSE YOUR CLASS' if kind == 'gym' else '🔮 CHOOSE YOUR PROFICIENCY'),
+            required_fragments=[f'<@&{rid}>' for rid in mapping.values()])
         checks.append(result)
     return checks
 
