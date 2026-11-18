@@ -281,7 +281,7 @@ class PurchaseMilestoneTests(unittest.TestCase):
             [('Profile', None), ('Streak', None), ('Ranks', None),
              ('Pauses', 1), ('Resume XP', 1),
              ('Inbox', 2), ('Bot DMs', 2), ('Claim Reward', 1),
-             ('All Quests', 2), ('Guild Blast', 2)],
+             ('All Quests', 0), ('Guild Blast', 2)],
         )
         pause_labels = [b.label for b in bot.PausePanelView(self.uid).children]
         self.assertEqual(pause_labels, ['Activate Pause', 'Resume XP', 'Refresh'])
