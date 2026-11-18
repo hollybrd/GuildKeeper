@@ -3296,7 +3296,7 @@ def player_stats_embed():
     embed = discord.Embed(
         title='✦ GYMGUILD — PLAYER HUB',
         description=('Welcome to your Guildkeeper player hub! Select a button below '
-                     'to privately view stats, streaks, ranks and Inbox, manage pauses, and choose private Bot DMs or Guild Blast mentions.'),
+                     'to privately view your stats, quests, ranks and Inbox, manage pauses, and choose notification settings.'),
         color=0x71A7A2)
     embed.add_field(name='👤 Profile', value='Your XP, rank, and next milestone', inline=False)
     embed.add_field(name='🔥 Streak', value='Your completed weeks and current streak', inline=False)
@@ -3307,6 +3307,7 @@ def player_stats_embed():
     embed.add_field(name='📥 Inbox', value='Review private alerts and your lost XP history', inline=False)
     embed.add_field(name='✉️ Bot DMs', value='Disable DMs to stop private pings; Inbox remains available', inline=False)
     embed.add_field(name='🔔 Guild Blast', value='Opt in or out of Guild announcement mentions at any time', inline=False)
+    embed.add_field(name='📜 All Quests', value='Track weekly objectives and permanent milestones with links to their channels', inline=False)
     embed.set_footer(text='GYMGUILD ✦ Where culture meets strength')
     return embed
 
@@ -3464,6 +3465,108 @@ class BotDMToggleView(discord.ui.View):
             view=None)
 
 
+def quest_channel_link(guild: discord.Guild, channel_id: int, fallback: str) -> str:
+    """Mention an existing Guild channel; never link to a guessed location."""
+    channel = guild.get_channel(channel_id) if channel_id else None
+    return channel.mention if isinstance(channel, discord.TextChannel) else fallback
+
+
+def quest_category_link(guild: discord.Guild, category_id: int, fallback: str) -> str:
+    category = guild.get_channel(category_id) if category_id else None
+    if isinstance(category, discord.CategoryChannel):
+        channels = [c for c in category.text_channels
+                    if c.permissions_for(guild.default_role).view_channel]
+        if channels:
+            return channels[0].mention
+    return fallback
+
+
+def milestone_board_link(guild: discord.Guild) -> str:
+    with connect() as db:
+        saved = db.execute('SELECT value FROM v12_config WHERE key=?',
+                           (f'milestone-board-{guild.id}',)).fetchone()
+    if saved:
+        try:
+            channel_id, message_id = map(int, saved['value'].split(':'))
+            channel = guild.get_channel(channel_id)
+            if isinstance(channel, discord.TextChannel):
+                return f'[Open Milestone Quests board](https://discord.com/channels/{guild.id}/{channel_id}/{message_id})'
+        except (TypeError, ValueError):
+            pass
+    return 'Ask an admin where the Milestone Quests board is posted.'
+
+
+def all_quests_embed(guild: discord.Guild, uid: int) -> discord.Embed:
+    """Private directory of the two active quest categories; Starter Quests are excluded."""
+    gid = guild.id
+    wk = week_key()
+    kinds = weekly_status(gid, uid, wk)
+    progress = milestone_progress(gid, uid)
+    paused = is_paused(gid, uid, wk)
+    weekly_channel = quest_channel_link(guild, QUESTS_CHANNEL_ID, 'Ask an admin for the Weekly Quest channel')
+    training_channel = quest_channel_link(guild, TRAINING_LOG_CHANNEL_ID, 'the training log')
+    forge_channel = quest_category_link(guild, GYM_CATEGORY_ID, 'a channel in ✦ THE FORGE ✦')
+    hobby_channel = quest_category_link(guild, HOBBY_CATEGORY_ID, 'a channel in ✦ OFF THE CLOCK ✦')
+    embed = discord.Embed(
+        title='✦ GYMGUILD — ALL QUESTS',
+        description=('Track your Guild quests and find their channels here. '
+                     '**Starter Quests are not included.** Your progress is visible only to you.'),
+        colour=discord.Colour.from_rgb(104, 163, 153),
+    )
+    requirements = [
+        ('training1', 'First Flame', f'Post a training update with an attachment in {training_channel}.'),
+        ('training2', 'Fuel the Fire', f'Post a second training update with an attachment on a different UK day in {training_channel}.'),
+        ('gym', 'Flex Text', f'Post a meaningful message in {forge_channel} (The Forge).'),
+        ('hobby', 'Skill Share', f'Post a meaningful message in {hobby_channel} (Off The Clock).'),
+    ]
+    items = [f'{"✅" if key in kinds else "⬜"} **{title}** — {description}'
+             for key, title, description in requirements]
+    note = ('⏸️ Paused — weekly XP cannot be earned until resumed.'
+            if paused else 'All four objectives automatically award the 50 XP completion bonus.')
+    embed.add_field(
+        name=f'⚔️ Weekly Side Quest — {len(kinds)}/4 objectives',
+        value=('Complete four objectives each week for up to **200 XP**, including '
+               'the completion bonus. Resets Monday 00:00 UK time.\n\n'
+               + '\n'.join(items) + '\n\n' + note
+               + f'\n**Quest board:** {weekly_channel}'),
+        inline=False)
+    milestone_lines = []
+    for key, label, xp, description in MILESTONE_QUESTS:
+        milestone_lines.append(
+            f'{"✅" if key in progress["claimed"] else "⬜"} **{label}** (+{xp} XP) — {description}')
+    embed.add_field(
+        name=f'🏆 Milestone Quests — {progress["completed"]}/{progress["total"]} completed',
+        value=('Permanent one-time achievements for training streaks, boosting the Guild '
+               'and your first verified Shopify purchase.\n\n'
+               + '\n'.join(milestone_lines)),
+        inline=False)
+    embed.add_field(
+        name='✦ Main Quest Completion',
+        value=('✅ **+500 XP bonus earned!**' if progress['bonus_earned'] else
+               f'🔒 Complete all six milestones for a one-time **+500 XP** bonus.')
+              + '\n' + milestone_board_link(guild),
+        inline=False)
+    embed.set_footer(text='Use Refresh to check your latest quest progress.')
+    return embed
+
+
+class AllQuestsView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild_id != GUILD_ID or interaction.user.id != self.user_id:
+            await interaction.response.send_message('This quest panel belongs to another member.', ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='Refresh Quests', emoji='🔄', style=discord.ButtonStyle.secondary)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=all_quests_embed(interaction.guild, self.user_id), view=self)
+
+
 class PlayerStatsView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -3550,6 +3653,15 @@ class PlayerStatsView(discord.ui.View):
             view=RewardChoiceView(interaction.user.id), ephemeral=True)
 
 
+
+    @discord.ui.button(label='All Quests', emoji='📜', style=discord.ButtonStyle.secondary,
+                       custom_id='guildkeeper:stats:all_quests', row=3)
+    async def all_quests_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID:
+            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
+        await interaction.response.send_message(
+            embed=all_quests_embed(interaction.guild, interaction.user.id),
+            view=AllQuestsView(interaction.user.id), ephemeral=True)
 
     @discord.ui.button(label='Guild Blast', emoji='🔔', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:stats:guild_blast', row=2)
