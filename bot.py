@@ -649,12 +649,14 @@ async def admin_spawnpoint_test(interaction: discord.Interaction, member: discor
 def guildkeeper_welcome_dm() -> str:
     """One short onboarding DM; never gate access on Discord DM permissions."""
     start_here = f'<#{STARTER_CHANNEL_ID}>' if STARTER_CHANNEL_ID else '#start-here'
+    player_hub = (f'<#{PLAYER_STATS_CHANNEL_ID}>' if PLAYER_STATS_CHANNEL_ID
+                  else '#stats-and-streaks')
     return (
         '🛡️ **Welcome to GYMGUILD!** ✦\n'
         f'Head to {start_here} and complete your **Starter Quest** to unlock '
         'all Guild channels.\n\n'
         'GuildKeeper reminders are on by default. After completing the Starter Quest, '
-        'you can switch them off in **Player Hub → Bot DMs → Turn Off**.'
+        f'you can switch them off in {player_hub} → **Player Hub → Bot DMs → Turn Off**.'
     )
 
 
