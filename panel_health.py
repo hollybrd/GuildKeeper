@@ -197,7 +197,7 @@ async def snapshot(api, guild):
         _saved_config(api, f'leaderboard-post-{gid}'), api.LEADERBOARD_CHANNEL_ID)[1]
     leaderboard = await _check_message(
         guild, 'Leaderboard', api.LEADERBOARD_CHANNEL_ID, leaderboard_id,
-        expected_title='🏆 GYMGUILD — LEADERBOARD')
+        expected_title='🏆 GYMGUILD  -  LEADERBOARD')
     if leaderboard['state'] == 'current':
         # Leaderboard fields are live data and expected to change; the bot refreshes
         # it daily. A recorded refresh date is the accurate freshness criterion.
@@ -281,7 +281,7 @@ async def _repair_role_menu(api, guild, kind):
             'React to choose your training class. Selecting a different class replaces the previous one.'
             if kind == 'gym' else
             'React to select as many proficiencies as you like. Remove a reaction to unselect.')
-        lines = [f'{emoji} — <@&{role_id}>' for emoji, role_id in mapping.items()]
+        lines = [f'{emoji}  -  <@&{role_id}>' for emoji, role_id in mapping.items()]
         embed = discord.Embed(title=title, description=description + '\n\n' + '\n\n'.join(lines),
                               color=0x71A7A2)
         embed.set_footer(text='Class & Proficiency roles only · XP ranks are earned automatically')
@@ -416,7 +416,7 @@ async def repair(api, guild, states):
             else:
                 ok, info = False, f'{name}: no automatic refresh configured'
         except (discord.Forbidden, discord.HTTPException, ValueError) as exc:
-            ok, info = False, f'{name}: {type(exc).__name__} — refresh failed'
+            ok, info = False, f'{name}: {type(exc).__name__}  -  refresh failed'
         results.append((ok, info))
     return results
 
@@ -428,13 +428,13 @@ def render(states):
     counts = {state: sum(item['state'] == state for item in states)
               for state in icons}
     lines = [
-        '🛡️ **GUILDKEEPER — PERMANENT PANEL HEALTH**',
+        '🛡️ **GUILDKEEPER  -  PERMANENT PANEL HEALTH**',
         f'**{counts["current"]}/{len(states)}** confirmed current · '
         f'**{counts["outdated"]}** outdated · **{counts["missing"]}** missing',
         '',
     ]
     for item in states:
-        line = f'{icons[item["state"]]} **{item["name"]}** — {item["detail"]}'
+        line = f'{icons[item["state"]]} **{item["name"]}**  -  {item["detail"]}'
         if item['url']:
             line += f'\n    [View panel]({item["url"]})'
         lines.append(line)
