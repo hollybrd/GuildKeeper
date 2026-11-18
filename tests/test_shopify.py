@@ -133,7 +133,8 @@ class ShopifyTests(unittest.IsolatedAsyncioTestCase):
                        (ticket_id,bot.GUILD_ID,target_id,"Legend",1001,
                         "open",bot.utc_now().isoformat()))
         send=AsyncMock(return_value=SimpleNamespace(id=999))
-        interaction=SimpleNamespace(channel_id=1001,channel=SimpleNamespace(send=send))
+        interaction=SimpleNamespace(channel_id=1001,channel=SimpleNamespace(send=send),
+                                    user=SimpleNamespace(id=111))
         with patch.object(shopify_client,"admin_configured",return_value=True), \
              patch.object(shopify_client,"create_discount",new=AsyncMock(
                  return_value="gid://shopify/DiscountCodeNode/1")) as create:
