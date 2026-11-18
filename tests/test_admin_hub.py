@@ -27,8 +27,8 @@ class AdminHubTests(unittest.TestCase):
         self.assertEqual(
             [item.label for item in view.children],
             ['Players', 'Rewards & Orders', 'Announcements',
-             'Audit Log', 'Bot Controls'])
-        self.assertEqual([item.row for item in view.children], [0,0,0,1,1])
+             'Audit Log', 'Health Check', 'Bot Controls'])
+        self.assertEqual([item.row for item in view.children], [0,0,0,1,1,1])
 
     def test_admin_only_permission_policy(self):
         def interaction(gid, manage):
@@ -212,3 +212,61 @@ class PermanentPanelHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(screen, ['Check Again', 'Refresh Panels'])
         confirmation = [button.label for button in admin_hub.ConfirmPanelRefresh(123).children]
         self.assertEqual(confirmation, ['Confirm Refresh', 'Cancel'])
+
+class StandaloneHealthTests(unittest.TestCase):
+    def test_overall_never_claims_healthy_when_unknown_or_missing(self):
+        import health_check
+        empty = lambda state: {'name': 'Example', 'state': state, 'detail': 'test'}
+        self.assertEqual(health_check.overall(
+            {'core': [empty('current')], 'panels': [empty('current')]}), 'healthy')
+        self.assertEqual(health_check.overall(
+            {'core': [empty('current')], 'panels': [empty('unknown')]}), 'partial')
+        self.assertEqual(health_check.overall(
+            {'core': [empty('current')], 'panels': [empty('missing')]}), 'attention')
+        self.assertEqual(health_check.overall(
+            {'core': [empty('problem')], 'panels': [empty('current')]}), 'attention')
+
+    def test_standalone_button_and_private_subpanel(self):
+        self.assertIn('Health Check', [b.label for b in admin_hub.AdminHubView().children])
+        self.assertNotIn('Health Check', [b.label for b in admin_hub.ControlMenu(1).children])
+        self.assertEqual(
+            [b.label for b in admin_hub.HealthCheckMenu(1).children],
+            ['Check Again', 'Permanent Panels'])
+
+    def test_database_health(self):
+        import health_check
+        with tempfile.TemporaryDirectory() as temp:
+            original = bot.DB
+            try:
+                bot.DB = Path(temp) / 'health.db'
+                bot.setup_db()
+                self.assertEqual(health_check.check_database(bot)['state'], 'current')
+            finally:
+                bot.DB = original
+
+
+class TestingCheatsTests(unittest.TestCase):
+    def test_persistent_test_panel_contains_shortcuts(self):
+        import testing_cheats
+        view = testing_cheats.TestingCheatsView()
+        self.assertTrue(view.is_persistent())
+        self.assertEqual([item.label for item in view.children],
+                         ['Add / Remove XP', 'Starter Reset', 'Weekly Reset',
+                          'Add Streak', 'Pause Reset', 'Rank Test Reset',
+                          'Reward Reset', 'All Test Commands'])
+        self.assertEqual([b.row for b in view.children], [0,0,0,1,1,1,2,2])
+
+    def test_member_actions_require_confirmation(self):
+        import testing_cheats
+        view = testing_cheats.ConfirmCheat(1, 2, 'starter_reset')
+        self.assertEqual([b.label for b in view.children],
+                         ['Confirm Test Action', 'Cancel'])
+        self.assertFalse(view.used)
+        picker = testing_cheats.CheatMemberPickerView(1, 'starter_reset')
+        self.assertEqual(len(picker.children), 1)
+
+    def test_testing_command_exists_as_backup_and_setup(self):
+        self.assertIsNotNone(bot.bot.tree.get_command('admin_testing_panel_post'))
+        self.assertIsNotNone(bot.bot.tree.get_command('admin_starter_reset'))
+        self.assertIsNotNone(bot.bot.tree.get_command('admin_weekly_reset'))
+
