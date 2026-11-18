@@ -283,6 +283,7 @@ class PurchaseMilestoneTests(unittest.TestCase):
              ('Guild Blast', 2)],
         )
         self.assertEqual(len(bot.PrivateProgressView(self.uid, 'profile').children), 1)
+        self.assertEqual([b.label for b in bot.RankProfileButtonView(self.uid).children], ['View Rank'])
         self.assertLessEqual(len(hub.children), 25)
 
     def test_one_lifetime_submission_persists_after_restart(self):
