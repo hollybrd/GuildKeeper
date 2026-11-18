@@ -268,6 +268,39 @@ class ConfirmQuestCompletion(Private):
         await interaction.response.edit_message(content='Test quest completion cancelled.', view=None)
 
 
+
+class ResetReasonForm(discord.ui.Modal):
+    """Require a reason and show a precise reset preview."""
+    def __init__(self, owner_id, target_id, action, rank=None):
+        super().__init__(title='Reason For Admin Reset', timeout=300)
+        self.owner_id = owner_id
+        self.target_id = target_id
+        self.action = action
+        self.rank = rank
+        self.reason = discord.ui.TextInput(
+            label='Reason / testing purpose', max_length=180,
+            placeholder='e.g. Retesting weekly completion',
+            style=discord.TextStyle.paragraph, required=True)
+        self.add_item(self.reason)
+
+    async def on_submit(self, interaction):
+        if not permitted(interaction) or interaction.user.id != self.owner_id:
+            return await denied(interaction)
+        reason = self.reason.value.strip()
+        if not reason:
+            return await interaction.response.send_message('Enter a reason.', ephemeral=True)
+        summary, snapshot = admin_action_safety.impact(
+            api, interaction.guild_id, self.target_id, self.action, rank=self.rank)
+        await interaction.response.send_message(
+            '⚠️ **Confirm Admin Reset**\n'
+            + 'Target ID: ' + str(self.target_id) + '\n' + summary
+            + '\n**Reason:** ' + discord.utils.escape_mentions(reason)
+            + '\n\n**Changes real Guild data; cannot be automatically undone.**',
+            view=ConfirmCheat(self.owner_id, self.target_id, self.action,
+                              rank=self.rank, reason=reason, snapshot=snapshot),
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
 class StreakChoiceView(Private):
     @discord.ui.button(label='Add Streak Weeks', emoji='➕', style=discord.ButtonStyle.success)
     async def add(self, interaction, button):
