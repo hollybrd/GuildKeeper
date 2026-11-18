@@ -382,7 +382,9 @@ class PurchaseMilestoneTests(unittest.TestCase):
         message = bot.guildkeeper_welcome_dm()
         self.assertIn('Starter Quest', message)
         self.assertIn('Bot DMs', message)
-        self.assertIn('#stats-and-streaks', message)
+        self.assertIn(
+            f'<#{bot.PLAYER_STATS_CHANNEL_ID}>' if bot.PLAYER_STATS_CHANNEL_ID
+            else '#stats-and-streaks', message)
         self.assertIn('Turn Off', message)
         self.assertLess(len(message), 450)
         member = SimpleNamespace(
