@@ -292,12 +292,28 @@ class AnnouncementMenu(PrivateMenu):
     @discord.ui.button(label='Open Scheduler Dashboard', emoji='📨',
                        style=discord.ButtonStyle.primary, row=1)
     async def scheduler_dashboard(self, interaction, button):
-        await interaction.response.send_message(
+        with api.connect() as db:
+            row=db.execute(
+                'SELECT value FROM v12_config WHERE key=?',
+                (f'message-scheduler-panel-{api.GUILD_ID}',)).fetchone()
+        jump=None
+        if row:
+            try:
+                cid,mid=(int(x) for x in row['value'].split(':'))
+                jump=f'https://discord.com/channels/{api.GUILD_ID}/{cid}/{mid}'
+            except (ValueError,TypeError):
+                pass
+        message=(
+            f'📨 **Permanent Message Scheduler**\n'
+            f'[Open the scheduler dashboard]({jump})\n'
+            'From there you can view the timeline, edit posts and manage automations.'
+            if jump else
             '📨 **Permanent Message Scheduler**\n'
-            'Use /admin_scheduler_post in a private staff channel to create or move '
-            'the permanent dashboard. It includes a timeline, automation status, '
-            'new message and automation controls.',
-            ephemeral=True)
+            'Use /admin_scheduler_post in a private staff channel to create '
+            'the dashboard. It includes a timeline, automation status, '
+            'new message and automation controls.')
+        await interaction.response.send_message(
+            message,ephemeral=True,allowed_mentions=discord.AllowedMentions.none())
 
     @discord.ui.button(label='Schedule Message', emoji='📅', style=discord.ButtonStyle.primary)
     async def schedule(self, interaction, button):
