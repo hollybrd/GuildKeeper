@@ -128,6 +128,14 @@ def setup_db():
           PRIMARY KEY(guild_id,user_id));
         CREATE TABLE IF NOT EXISTS schedule_posts (guild_id INTEGER NOT NULL, post_key TEXT NOT NULL,
           PRIMARY KEY(guild_id,post_key));
+        CREATE TABLE IF NOT EXISTS notification_preferences (
+          guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, dm_enabled INTEGER NOT NULL DEFAULT 1,
+          PRIMARY KEY(guild_id,user_id));
+        CREATE TABLE IF NOT EXISTS player_notifications (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL, category TEXT NOT NULL, title TEXT NOT NULL,
+          body TEXT NOT NULL, event_key TEXT, created_at TEXT NOT NULL,
+          read_at TEXT, dm_sent_at TEXT, UNIQUE(guild_id,user_id,event_key));
         ''')
         # Carry forward any historical first-purchase requests without touching
         # milestone claims, XP balances or existing moderator decisions.
@@ -326,6 +334,114 @@ def get_xp(guild_id, user_id):
         return row['xp'] if row else 0
 
 
+def bot_dms_enabled(gid, uid):
+    with connect() as db:
+        row = db.execute('SELECT dm_enabled FROM notification_preferences WHERE guild_id=? AND user_id=?',
+                         (gid,uid)).fetchone()
+    return bool(row['dm_enabled']) if row else True
+
+
+def set_bot_dms(gid, uid, enabled):
+    with connect() as db:
+        db.execute('INSERT INTO notification_preferences VALUES (?,?,?) '
+                   'ON CONFLICT(guild_id,user_id) DO UPDATE SET dm_enabled=excluded.dm_enabled',
+                   (gid,uid,int(enabled)))
+
+
+def record_notification(db, gid, uid, category, title, body, key=None):
+    db.execute('INSERT OR IGNORE INTO player_notifications '
+               '(guild_id,user_id,category,title,body,event_key,created_at) VALUES (?,?,?,?,?,?,?)',
+               (gid,uid,category,title,body,key,utc_now().isoformat()))
+
+
+def inbox_text(gid, uid, mode='unread'):
+    with connect() as db:
+        if mode == 'xp':
+            rows = db.execute('SELECT amount,reason,created_at FROM xp_log '
+                              'WHERE guild_id=? AND user_id=? AND amount<0 ORDER BY id DESC LIMIT 12',
+                              (gid,uid)).fetchall()
+            if not rows:
+                return '📉 **Lost XP history**\nNo deductions recorded.'
+            lines = ['📉 **Lost XP history** (12 most recent)']
+            for r in rows:
+                date = datetime.fromisoformat(r['created_at']).strftime('%d %b %Y')
+                lines.append(f"• **{r['amount']} XP** · {date} — {discord.utils.escape_markdown(r['reason'])[:120]}")
+            lines.append('\nAdmin reversals are recorded separately in the XP audit log.')
+            return '\n'.join(lines)[:1900]
+        where = ' AND read_at IS NULL' if mode == 'unread' else ''
+        rows = db.execute('SELECT title,body,created_at,read_at FROM player_notifications '
+                          'WHERE guild_id=? AND user_id=?' + where + ' ORDER BY id DESC LIMIT 10',
+                          (gid,uid)).fetchall()
+        lines = ['🔔 **Unread notifications**' if mode == 'unread' else '📥 **All notifications**']
+        for r in rows:
+            date = datetime.fromisoformat(r['created_at']).strftime('%d %b %Y')
+            lines.append(('🔵 ' if not r['read_at'] else '') +
+                         f"**{discord.utils.escape_markdown(r['title'])[:80]}** · {date}\n" +
+                         discord.utils.escape_markdown(r['body'])[:150])
+        if not rows:
+            lines.append('No notifications here.')
+        return '\n\n'.join(lines)[:1900]
+
+
+async def deliver_notifications():
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        return
+    with connect() as db:
+        rows = db.execute('SELECT n.id,n.user_id,n.title,n.body FROM player_notifications n '
+                          'LEFT JOIN notification_preferences p ON p.guild_id=n.guild_id AND p.user_id=n.user_id '
+                          'WHERE n.guild_id=? AND n.dm_sent_at IS NULL AND COALESCE(p.dm_enabled,1)=1 '
+                          'ORDER BY n.id LIMIT 40',(GUILD_ID,)).fetchall()
+    for r in rows:
+        # Mark first to ensure retries do not spam members whose privacy settings change.
+        with connect() as db:
+            claimed = db.execute('UPDATE player_notifications SET dm_sent_at=? '
+                                 'WHERE id=? AND dm_sent_at IS NULL AND NOT EXISTS ('
+                                 'SELECT 1 FROM notification_preferences p '
+                                 'WHERE p.guild_id=player_notifications.guild_id '
+                                 'AND p.user_id=player_notifications.user_id AND p.dm_enabled=0)',
+                                 (utc_now().isoformat(),r['id'])).rowcount
+        if not claimed:
+            continue
+        try:
+            member = guild.get_member(r['user_id']) or await guild.fetch_member(r['user_id'])
+            await member.send(f"✦ **GuildKeeper — {r['title']}**\n{r['body']}\n\n"
+                              'Open your private Inbox in **#stats-and-streaks**. '
+                              'Bot DMs can be disabled in the Player Hub.',
+                              allowed_mentions=discord.AllowedMentions.none())
+        except (discord.NotFound,discord.Forbidden,discord.HTTPException):
+            log.info('GuildKeeper DM unavailable for %s',r['user_id'])
+
+
+def create_streak_warnings():
+    if utc_now().astimezone(TZ).weekday() != 6:
+        return
+    wk = week_key()
+    with connect() as db:
+        members = db.execute('SELECT user_id FROM members WHERE guild_id=?',(GUILD_ID,)).fetchall()
+        for member in members:
+            uid = member['user_id']
+            if not db.execute('SELECT 1 FROM starter_turnins WHERE guild_id=? AND user_id=?',
+                              (GUILD_ID,uid)).fetchone():
+                continue
+            if db.execute('SELECT 1 FROM weekly_completions WHERE guild_id=? AND user_id=? AND week_key=?',
+                          (GUILD_ID,uid,wk)).fetchone():
+                continue
+            if db.execute('SELECT 1 FROM pauses p WHERE guild_id=? AND user_id=? AND week_key=? '
+                          'AND NOT EXISTS (SELECT 1 FROM resumed_pauses r '
+                          'WHERE r.guild_id=p.guild_id AND r.user_id=p.user_id AND r.week_key=p.week_key)',
+                          (GUILD_ID,uid,wk)).fetchone():
+                continue
+            count = db.execute('SELECT COUNT(*) n FROM weekly_actions WHERE guild_id=? AND user_id=? '
+                               "AND week_key=? AND kind IN ('training1','training2','gym','hobby')",
+                               (GUILD_ID,uid,wk)).fetchone()['n']
+            record_notification(db,GUILD_ID,uid,'streak','Weekly Quest Deadline',
+                                f'{count}/4 objectives recorded. Complete your Weekly Quest '
+                                'before Monday 00:00 UK time to protect your streak. '
+                                'Fully inactive weeks may deduct 25 XP.',
+                                f'weekly-warning:{wk}')
+
+
 def add_xp(guild_id, user_id, amount, reason, db=None):
     """Use an existing transaction for quest claims to make rewards atomic."""
     if db is None:
@@ -334,8 +450,12 @@ def add_xp(guild_id, user_id, amount, reason, db=None):
     db.execute('INSERT OR IGNORE INTO members(guild_id,user_id,xp) VALUES (?,?,0)', (guild_id,user_id))
     db.execute('UPDATE members SET xp=MAX(0,xp+?) WHERE guild_id=? AND user_id=?',
                (amount,guild_id,user_id))
-    db.execute('INSERT INTO xp_log(guild_id,user_id,amount,reason,created_at) VALUES (?,?,?,?,?)',
-               (guild_id,user_id,amount,reason,utc_now().isoformat()))
+    event = db.execute('INSERT INTO xp_log(guild_id,user_id,amount,reason,created_at) VALUES (?,?,?,?,?)',
+                       (guild_id,user_id,amount,reason,utc_now().isoformat()))
+    if amount:
+        record_notification(db,guild_id,user_id,'xp_loss' if amount<0 else 'xp',
+                            'XP Deducted' if amount<0 else 'XP Earned',
+                            f'{amount:+d} XP — {reason}',f'xp-log:{event.lastrowid}')
     return db.execute('SELECT xp FROM members WHERE guild_id=? AND user_id=?',
                       (guild_id,user_id)).fetchone()['xp']
 
@@ -511,6 +631,11 @@ async def update_rank(member: discord.Member, xp: int, announce: bool = True) ->
     except sqlite3.Error:
         log.exception('Could not record highest rank for member %s', member.id)
         return True
+    if new_milestones:
+        with connect() as db:
+            for _, to_rank in new_milestones:
+                record_notification(db,member.guild.id,member.id,'rank',
+                                    'Rank Unlocked',f'You unlocked {to_rank}!',f'rank:{to_rank}')
     if announce:
         for from_rank, to_rank in new_milestones:
             await announce_level_up(member, from_rank, to_rank, xp)
@@ -608,6 +733,15 @@ async def admin_spawnpoint_test(interaction: discord.Interaction, member: discor
 @bot.event
 async def on_member_join(member: discord.Member):
     if member.guild.id == GUILD_ID and not member.bot:
+        if bot_dms_enabled(member.guild.id,member.id):
+            try:
+                await member.send(
+                    '✦ Welcome to GYMGUILD! Complete your Starter Quests to unlock all channels. '
+                    'Once complete, visit the Player Hub in **#stats-and-streaks** to turn '
+                    'off **Bot DMs** or open your private **Inbox**.',
+                    allowed_mentions=discord.AllowedMentions.none())
+            except (discord.Forbidden,discord.HTTPException):
+                pass
         await send_spawnpoint_welcome(member)
         await update_rank(member, get_xp(member.guild.id, member.id), announce=False)
         current_roles = {r.id for r in member.roles}
@@ -1357,6 +1491,22 @@ async def settle_previous_weeks():
                 db.execute('BEGIN IMMEDIATE')
                 inserted = db.execute('INSERT OR IGNORE INTO weekly_settlements VALUES (?,?,?,?)',(GUILD_ID,uid,wk,utc_now().isoformat()))
                 if inserted.rowcount:
+                    paused = db.execute(
+                        'SELECT 1 FROM pauses p WHERE p.guild_id=? AND p.user_id=? AND p.week_key=? '
+                        'AND NOT EXISTS (SELECT 1 FROM resumed_pauses r '
+                        'WHERE r.guild_id=p.guild_id AND r.user_id=p.user_id AND r.week_key=p.week_key)',
+                        (GUILD_ID,uid,wk)).fetchone()
+                    complete = db.execute(
+                        'SELECT 1 FROM weekly_completions WHERE guild_id=? AND user_id=? AND week_key=?',
+                        (GUILD_ID,uid,wk)).fetchone()
+                    previous = (cursor-timedelta(days=7)).date().isoformat()
+                    had_streak = db.execute(
+                        'SELECT 1 FROM weekly_completions WHERE guild_id=? AND user_id=? AND week_key=?',
+                        (GUILD_ID,uid,previous)).fetchone()
+                    if had_streak and not complete and not paused:
+                        record_notification(db,GUILD_ID,uid,'streak','Streak Lost',
+                                            f'Your streak ended after the week of {wk}. '
+                                            'Complete the next quest to rebuild it.',f'streak-lost:{wk}')
                     if week_needs_inactivity_penalty(db, GUILD_ID, uid, wk):
                         add_xp(GUILD_ID,uid,-25,'Inactive week '+wk,db)
                         changed = True
@@ -3121,13 +3271,15 @@ def player_stats_embed():
     embed = discord.Embed(
         title='✦ GYMGUILD — PLAYER HUB',
         description=('Welcome to your Guildkeeper player hub! Select a button below '
-                     'to privately view your stats, streak and ranks, manage pauses, and choose Guild Blast notifications.'),
+                     'to privately view stats, streaks, ranks and Inbox, manage pauses, and choose private Bot DMs or Guild Blast mentions.'),
         color=0x71A7A2)
     embed.add_field(name='👤 Profile', value='Your XP, rank, and next milestone', inline=False)
     embed.add_field(name='🔥 Streak', value='Your completed weeks and current streak', inline=False)
     embed.add_field(name='🏆 Ranks', value='All Guild XP ranks and requirements', inline=False)
     embed.add_field(name='⏸️ Activate Pause', value='Use a pause for the current weekly quest (2 per rolling 13 weeks)', inline=False)
     embed.add_field(name='▶️ Resume XP', value='End an active pause early and resume earning XP; the pause is not refunded', inline=False)
+    embed.add_field(name='📥 Inbox', value='Review private alerts and your lost XP history', inline=False)
+    embed.add_field(name='✉️ Bot DMs', value='Disable DMs to stop private pings; Inbox remains available', inline=False)
     embed.add_field(name='🔔 Guild Blast', value='Opt in or out of Guild announcement mentions at any time', inline=False)
     embed.add_field(name='🎟️ Claim Reward', value='See eligible one-time rank rewards and open a private ticket with admins', inline=False)
     embed.add_field(name='🏆 Milestone Quests', value='See your milestones and progress, and submit Shopify orders', inline=False)
@@ -3228,6 +3380,66 @@ class PrivateProgressView(discord.ui.View):
         )
 
 
+class NotificationInboxView(discord.ui.View):
+    def __init__(self, uid):
+        super().__init__(timeout=300)
+        self.uid = uid
+
+    async def interaction_check(self, interaction):
+        if interaction.guild_id != GUILD_ID or interaction.user.id != self.uid:
+            await interaction.response.send_message('This private inbox is not yours.',ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='Unread', emoji='🔔', style=discord.ButtonStyle.secondary)
+    async def unread(self, interaction, button):
+        await interaction.response.edit_message(content=inbox_text(interaction.guild_id,self.uid),view=self)
+
+    @discord.ui.button(label='All', emoji='📥', style=discord.ButtonStyle.secondary)
+    async def all(self, interaction, button):
+        await interaction.response.edit_message(content=inbox_text(interaction.guild_id,self.uid,'all'),view=self)
+
+    @discord.ui.button(label='Lost XP', emoji='📉', style=discord.ButtonStyle.secondary)
+    async def xp(self, interaction, button):
+        await interaction.response.edit_message(content=inbox_text(interaction.guild_id,self.uid,'xp'),view=self)
+
+    @discord.ui.button(label='Mark All Read', emoji='✅', style=discord.ButtonStyle.success,row=1)
+    async def mark_read(self, interaction, button):
+        with connect() as db:
+            db.execute('UPDATE player_notifications SET read_at=? '
+                       'WHERE guild_id=? AND user_id=? AND read_at IS NULL',
+                       (utc_now().isoformat(),interaction.guild_id,self.uid))
+        await interaction.response.edit_message(content=inbox_text(interaction.guild_id,self.uid,'all'),view=self)
+
+
+class BotDMToggleView(discord.ui.View):
+    def __init__(self, uid):
+        super().__init__(timeout=180)
+        self.uid = uid
+
+    async def interaction_check(self, interaction):
+        if interaction.guild_id != GUILD_ID or interaction.user.id != self.uid:
+            await interaction.response.send_message('These settings are not yours.',ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='Enable Bot DMs', emoji='✉️', style=discord.ButtonStyle.success)
+    async def enable(self, interaction, button):
+        set_bot_dms(interaction.guild_id,self.uid,True)
+        await interaction.response.edit_message(
+            content='✅ **Bot DMs enabled.** Private reminders will be delivered by DM and '
+                    'saved in your Inbox in **#stats-and-streaks**.',view=None)
+
+    @discord.ui.button(label='Disable Bot DMs', emoji='🔕', style=discord.ButtonStyle.secondary)
+    async def disable(self, interaction, button):
+        set_bot_dms(interaction.guild_id,self.uid,False)
+        await interaction.response.edit_message(
+            content='🔕 **Bot DMs disabled.** You will not receive proactive private '
+                    'DMs or pings for streaks, XP or deadlines. Notifications are still saved '
+                    'in your private **Inbox** in **#stats-and-streaks**, but you must check it yourself.',
+            view=None)
+
+
 class PlayerStatsView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -3296,6 +3508,28 @@ class PlayerStatsView(discord.ui.View):
             'Guild Blast is an optional role used for announcements by admins and Guildkeeper. '
             'Choose below to change your preference.',
             view=GuildBlastToggleView(interaction.user.id), ephemeral=True)
+
+    @discord.ui.button(label='Inbox', emoji='📥', style=discord.ButtonStyle.secondary,
+                       custom_id='guildkeeper:stats:inbox',row=2)
+    async def inbox_button(self, interaction, button):
+        if interaction.guild_id != GUILD_ID:
+            return await interaction.response.send_message('Only available in GYMGUILD.',ephemeral=True)
+        await interaction.response.send_message(
+            inbox_text(interaction.guild_id,interaction.user.id),
+            view=NotificationInboxView(interaction.user.id),ephemeral=True)
+
+    @discord.ui.button(label='Bot DMs', emoji='✉️', style=discord.ButtonStyle.secondary,
+                       custom_id='guildkeeper:stats:bot_dms',row=2)
+    async def dm_button(self, interaction, button):
+        if interaction.guild_id != GUILD_ID:
+            return await interaction.response.send_message('Only available in GYMGUILD.',ephemeral=True)
+        enabled = bot_dms_enabled(interaction.guild_id,interaction.user.id)
+        await interaction.response.send_message(
+            f'✉️ **Bot DMs are {"ON" if enabled else "OFF"}.**\n\n'
+            'If you disable Bot DMs, GuildKeeper will no longer proactively ping or DM you. '
+            'All notifications, including XP deductions, will still appear in your private '
+            '**Inbox** in **#stats-and-streaks**, but you must check it yourself.',
+            view=BotDMToggleView(interaction.user.id),ephemeral=True)
 
     @discord.ui.button(label='Milestone Quests', emoji='🏆', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:stats:milestone_quests', row=2)
@@ -3499,6 +3733,8 @@ async def admin_leaderboard_update(interaction: discord.Interaction):
 @tasks.loop(minutes=1)
 async def scheduler():
     await settle_previous_weeks()
+    create_streak_warnings()
+    await deliver_notifications()
     await post_weekly_board()
     await update_permanent_leaderboard()
     await expire_reward_tickets()
