@@ -19,6 +19,8 @@ class AnnouncementSchedulerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
         self.old_db=bot.DB
+        self.old_announcements_channel=bot.ANNOUNCEMENTS_CHANNEL_ID
+        bot.ANNOUNCEMENTS_CHANNEL_ID=123
         bot.DB=Path(self.temp.name)/"schedule-test.db"
         bot.setup_db()
         schedule.api=bot
@@ -29,6 +31,7 @@ class AnnouncementSchedulerTests(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         bot.DB=self.old_db
+        bot.ANNOUNCEMENTS_CHANNEL_ID=self.old_announcements_channel
         self.temp.cleanup()
 
     def data(self, when="2026-11-19 09:30", recurrence="once", ping=False):
