@@ -1070,7 +1070,8 @@ def reset_milestone_test_data(gid: int, uid: int, target: str) -> dict:
             # Do not destroy verification or moderator history. Archiving
             # every prior row prevents a stale approval button from granting XP.
             result['orders_archived'] = db.execute(
-                "UPDATE purchase_orders SET status='test_reset' "
+                "UPDATE purchase_orders SET status='test_reset', "
+                "order_reference='[test reset ' || id || '] ' || order_reference "
                 "WHERE guild_id=? AND user_id=? AND status IN ('pending','approved','rejected','cancelled')",
                 (gid, uid),
             ).rowcount
@@ -1121,12 +1122,12 @@ async def admin_milestone_test_reset(
         )
     await update_rank(interaction.user, get_xp(interaction.guild_id, interaction.user.id))
     await interaction.followup.send(
-        f'🧪 **Milestone test reset: {target.name}**\\n'
-        f'Order claim cleared: **{"Yes" if result["order"] else "No claim found"}**\\n'
-        f'Boost claim cleared: **{"Yes" if result["boost"] else "No claim found"}**\\n'
-        f'Main Quest Completion claim reversed: **{"Yes" if result["completion"] else "Not needed"}**\\n'
-        f'Historical order requests archived: **{result["orders_archived"]}**\\n'
-        f'XP reversed: **{result["xp_reversed"]}**\\n\\n'
+        f'🧪 **Milestone test reset: {target.name}**\n'
+        f'Order claim cleared: **{"Yes" if result["order"] else "No claim found"}**\n'
+        f'Boost claim cleared: **{"Yes" if result["boost"] else "No claim found"}**\n'
+        f'Main Quest Completion claim reversed: **{"Yes" if result["completion"] else "Not needed"}**\n'
+        f'Historical order requests archived: **{result["orders_archived"]}**\n'
+        f'XP reversed: **{result["xp_reversed"]}**\n\n'
         'New Order XP requests can now be tested through Milestone Quests. '
         'To re-test automatic boost XP, Discord must emit a new boost-start '
         'event (an existing active boost does not trigger it).',
@@ -1895,10 +1896,12 @@ def purchase_order_summary(gid: int, uid: int) -> dict:
             (gid, uid),
         ).fetchone() is not None
         actual = db.execute(
-            "SELECT SUM(amount) AS total FROM xp_log "
-            "WHERE guild_id=? AND user_id=? AND reason='purchase1'",
+            "SELECT amount FROM xp_log "
+            "WHERE guild_id=? AND user_id=? AND reason='purchase1' AND amount>0 "
+            "ORDER BY id DESC LIMIT 1",
             (gid, uid),
-        ).fetchone()['total']
+        ).fetchone()
+        actual = actual['amount'] if actual else 0
     return {
         'approved': sum(row['status'] == 'approved' for row in records),
         'pending': sum(row['status'] == 'pending' for row in records),
@@ -2183,11 +2186,12 @@ def boost_milestone_message(gid: int, uid: int, currently_boosting: bool) -> str
     if awarded:
         with connect() as db:
             total = db.execute(
-                "SELECT SUM(amount) AS total FROM xp_log "
-                "WHERE guild_id=? AND user_id=? AND reason='boost1'",
+                "SELECT amount FROM xp_log "
+                "WHERE guild_id=? AND user_id=? AND reason='boost1' AND amount>0 "
+                "ORDER BY id DESC LIMIT 1",
                 (gid, uid),
-            ).fetchone()['total']
-        amount = f'{total} XP granted' if total is not None else 'XP reward claimed'
+            ).fetchone()
+        amount = f'{total["amount"]} XP granted' if total else 'XP reward claimed'
         return (
             f'💎 **Boost milestone complete — {amount}!** '
             'Thank you for supporting GYMGUILD and helping our community grow. ✦'
