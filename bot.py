@@ -2362,6 +2362,15 @@ class RewardChoiceView(discord.ui.View):
     async def paragon(self, interaction: discord.Interaction, button: discord.ui.Button):
         await create_reward_ticket(interaction, 'Paragon')
 
+    @discord.ui.button(label='Refresh Rewards', emoji='🔄', style=discord.ButtonStyle.secondary)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID:
+            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
+        await interaction.response.edit_message(
+            content=guild_rewards_progress_text(interaction.guild_id, interaction.user.id),
+            view=self,
+        )
+
 
 def is_ticket_mod(interaction: discord.Interaction) -> bool:
     member = interaction.user
@@ -2969,9 +2978,7 @@ class PlayerStatsView(discord.ui.View):
         if interaction.guild_id != GUILD_ID:
             return await interaction.response.send_message('This button is not available here.', ephemeral=True)
         await interaction.response.send_message(
-            '🎟️ **Guild Rewards**\n\n' + reward_eligibility_text(interaction.guild_id, interaction.user.id)
-            + '\n\nSelect an **eligible, unclaimed** rank reward below to open a private ticket with Guild admins. '
-              'Rank rewards are one-time Shopify discount codes, fulfilled manually by an admin.',
+            guild_rewards_progress_text(interaction.guild_id, interaction.user.id),
             view=RewardChoiceView(interaction.user.id), ephemeral=True)
 
 
