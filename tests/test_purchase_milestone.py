@@ -124,6 +124,18 @@ class PurchaseMilestoneTests(unittest.TestCase):
         self.assertTrue(any('awaiting approval' in field.value for field in bot.order_xp_embed(self.gid, self.uid).fields))
         self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
 
+    def test_refresh_controls_across_member_progress_panels(self):
+        milestone_buttons = {button.label for button in bot.MilestoneQuestsView(self.uid).children}
+        self.assertEqual(milestone_buttons, {'Refresh Progress', 'Cancel'})
+        self.assertNotIn('Submit Order', milestone_buttons)
+        self.assertIn('Submit Order XP', {button.label for button in bot.MilestoneBoardView().children})
+        for kind in ('starter', 'weekly', 'profile', 'ranks', 'streak'):
+            view = bot.PrivateProgressView(self.uid, kind)
+            self.assertEqual([button.label for button in view.children], ['Refresh Progress'])
+            self.assertEqual(view.user_id, self.uid)
+        reward_buttons = {button.label for button in bot.RewardChoiceView(self.uid).children}
+        self.assertIn('Refresh Rewards', reward_buttons)
+
     def test_milestone_rewards_and_cancel_controls_match_display(self):
         rewards = {kind: xp for kind, _, xp, _ in bot.MILESTONE_QUESTS}
         self.assertEqual(rewards, {
@@ -146,7 +158,7 @@ class PurchaseMilestoneTests(unittest.TestCase):
         )
         self.assertEqual(
             {item.label for item in bot.MilestoneQuestsView(self.uid).children},
-            {'Submit Order', 'Refresh Progress', 'Cancel'},
+            {'Refresh Progress', 'Cancel'},
         )
 
     def test_invalid_reference_preserves_data(self):
