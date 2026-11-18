@@ -3,6 +3,13 @@
 Never auto-publishes a panel without a known configured channel/location.
 Unknown or inaccessible messages are not replaced, to avoid duplicates.
 All decisions are recorded for the private Admin Hub Health Check.
+
+
+READING GUIDE
+-------------
+Periodic housekeeping for permanent Discord panels and scheduled-job health.
+The repair routine only operates where a known location exists. It deliberately
+skips uncertain states instead of risking duplicate posts.
 """
 import json
 import logging
@@ -13,12 +20,14 @@ import panel_health
 log = logging.getLogger('guildkeeper.maintenance')
 
 
+# Persist the latest maintenance outcome in the same SQLite settings table used elsewhere.
 def _record(api, data):
     with api.connect() as db:
         db.execute('INSERT OR REPLACE INTO v12_config(key,value) VALUES (?,?)',
                    (f'automatic-maintenance-{api.GUILD_ID}', json.dumps(data)))
 
 
+# Read the last repair summary for the private Health Check.
 def last_report(api):
     with api.connect() as db:
         row = db.execute('SELECT value FROM v12_config WHERE key=?',
@@ -32,6 +41,7 @@ def last_report(api):
 
 
 
+# Record whether each periodic job last succeeded or failed, with a timestamp.
 def record_job(api, name, success, error=None):
     """Last status for each scheduler task, retained across restarts."""
     key = f'scheduled-job-{api.GUILD_ID}-{name}'
@@ -45,6 +55,7 @@ def record_job(api, name, success, error=None):
                    (key, json.dumps(record)))
 
 
+# Collect job results so a broken task can be diagnosed without reading the whole log.
 def job_statuses(api):
     with api.connect() as db:
         rows = db.execute('SELECT key,value FROM v12_config WHERE key LIKE ?',
@@ -60,6 +71,7 @@ def job_statuses(api):
 
 
 
+# Throttle full panel scans; a Discord API scan on every minute would be wasteful.
 def needs_periodic_check(api, hours=6):
     """Avoid running the expensive live panel scan every scheduler minute."""
     previous = last_report(api)
@@ -72,6 +84,7 @@ def needs_periodic_check(api, hours=6):
         return True
 
 
+# Snapshot the panels, repair only known missing/outdated ones, then check again.
 async def reconcile(api, guild):
     """Check live message embeds/buttons and repair verifiably stale/missing panels."""
     timestamp = api.utc_now().isoformat()
