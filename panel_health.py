@@ -2,10 +2,19 @@
 
 Never writes or repairs panels. Uses saved message IDs where available; weekly
 quest boards are discovered from the configured channel for the current week.
+
+
+READING GUIDE
+-------------
+Permanent panels are saved Discord messages with buttons: for example the
+Player Hub, Testing Cheats, quest boards, leaderboard and Shop.
+snapshot() observes them, while repair() is the separate write operation.
+Uncertain access never triggers automatic replacement.
 """
 import discord
 
 
+# Compare only fields we authored, ignoring metadata Discord adds itself.
 def _same_embed(actual, expected):
     """Compare authored panel content, ignoring Discord's extra metadata."""
     if actual is None:
@@ -21,6 +30,7 @@ def _same_embed(actual, expected):
         (f.name, f.value, f.inline) for f in expected.fields]
 
 
+# Read actual button identifiers from a Discord message.
 def _button_ids(message):
     ids = []
     for row in message.components:
@@ -31,6 +41,7 @@ def _button_ids(message):
     return ids
 
 
+# Read the identifiers GuildKeeper expects from its current view classes.
 def _expected_buttons(view):
     return [item.custom_id for item in view.children if item.custom_id]
 
@@ -43,6 +54,7 @@ def _status(label, state, reason, channel=None, message=None):
     }
 
 
+# Fetch a saved message and decide whether its content/buttons are current.
 async def _check_message(guild, label, channel_id, message_id, embed=None, view=None,
                          role_emoji=None, expected_title=None, required_fragments=None):
     if not channel_id:
@@ -86,6 +98,7 @@ def _saved_config(api, key):
     return row['value'] if row else None
 
 
+# Read channel/message IDs from the saved settings format.
 def _parse_location(value, default_channel):
     if not value:
         return default_channel, None
@@ -100,6 +113,7 @@ def _parse_location(value, default_channel):
     return default_channel, None
 
 
+# Find the board for the current quest week instead of expecting a permanent message ID.
 async def _weekly_board(api, guild):
     label = 'Weekly Side Quest'
     channel = guild.get_channel(api.QUESTS_CHANNEL_ID)
@@ -126,6 +140,7 @@ async def _weekly_board(api, guild):
     return _status(label, 'missing', 'No current-week board found in recent messages')
 
 
+# Inspect every known permanent panel; this function does not post anything.
 async def snapshot(api, guild):
     """Inspect the live Discord messages, not merely stored post dates."""
     if guild is None:
@@ -211,6 +226,7 @@ async def snapshot(api, guild):
 
 
 
+# Edit an existing panel when possible; create a replacement only when genuinely missing.
 async def _repair_saved_embed(api, guild, label, channel_id, message_id,
                               expected_embed, expected_view, update_record):
     """Edit an existing panel first; only post a replacement when absent."""
@@ -237,6 +253,7 @@ async def _repair_saved_embed(api, guild, label, channel_id, message_id,
     return True, f'{label}: {"created" if not message_id else "updated or replaced"}'
 
 
+# Repair the reaction-based Class/Proficiency menus.
 async def _repair_role_menu(api, guild, kind):
     label = 'Class Role Menu' if kind == 'gym' else 'Proficiency Role Menu'
     channel = guild.get_channel(api.GET_ROLE_CHANNEL_ID)
@@ -292,6 +309,7 @@ async def _repair_role_menu(api, guild, kind):
     return True, f'{label}: created'
 
 
+# Repair the current week's board without posting an extra duplicate.
 async def _repair_weekly(api, guild):
     channel = guild.get_channel(api.QUESTS_CHANNEL_ID)
     if not isinstance(channel, discord.TextChannel):
@@ -324,6 +342,7 @@ async def _repair_weekly(api, guild):
                                     else 'unable to verify newly posted board'))
 
 
+# Apply the safe repairs that a moderator or maintenance job requested.
 async def repair(api, guild, states):
     """Repair only verifiably missing/outdated panels; never touch unknown/setup."""
     gid = guild.id
@@ -402,6 +421,7 @@ async def repair(api, guild, states):
     return results
 
 
+# Show panel state and repair guidance in the moderator interface.
 def render(states):
     icons = {'current': '✅', 'outdated': '🟠', 'missing': '❌',
              'setup': '⚙️', 'unknown': '❔'}
