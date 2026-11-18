@@ -188,7 +188,7 @@ class PurchaseMilestoneTests(unittest.TestCase):
         self.assertGreater(rewards['purchase1'], max(
             amount for key, amount in rewards.items() if key != 'purchase1'))
         panel = bot.milestone_board_embed()
-        self.assertEqual(panel.title, '✦ GYMGUILD — MILESTONE QUESTS ✦')
+        self.assertEqual(panel.title, '✦ GYMGUILD  -  MILESTONE QUESTS ✦')
         self.assertTrue(panel.fields[0].name.startswith('🎯'))
         self.assertTrue(panel.fields[-1].name.startswith('🛍️'))
         self.assertTrue(all('\n' in field.value for field in panel.fields))
