@@ -1869,7 +1869,7 @@ def submit_purchase_order(gid: int, uid: int, reference: str) -> tuple[str, int 
         if not reference or len(reference) > 80 or any(ord(char) < 32 for char in reference):
             return 'invalid', None
         row = db.execute(
-            'SELECT id,user_id,status FROM purchase_orders '
+            'SELECT id,user_id,status,review_message_id FROM purchase_orders '
             'WHERE guild_id=? AND order_reference=?',
             (gid, reference),
         ).fetchone()
@@ -1878,8 +1878,11 @@ def submit_purchase_order(gid: int, uid: int, reference: str) -> tuple[str, int 
                 return 'duplicate', None
             if row['status'] not in ('rejected', 'cancelled'):
                 return row['status'], row['id']
-            # Retrying the same reference reopens its existing row instead
-            # of violating the unique reference constraint.
+            # A previous moderator card can still be clicked after cancellation.
+            # Never reuse that card's order ID: submit a different reference.
+            if row['review_message_id'] is not None:
+                return 'used_reference', row['id']
+            # Without an old moderator card, reopening the row is safe.
             db.execute(
                 "UPDATE purchase_orders SET status='pending',submitted_at=?,"
                 "reviewed_at=NULL,reviewed_by=NULL,review_channel_id=NULL,review_message_id=NULL "
@@ -2014,6 +2017,9 @@ async def submit_order_from_interaction(interaction: discord.Interaction, refere
         message = '✅ Order XP granted — milestone objective complete.'
     elif status == 'rejected':
         message = '❌ Your request was rejected. You may submit a new order number.'
+    elif status == 'used_reference':
+        message = ('❌ This order reference was already submitted and reviewed or cancelled. '
+                   'Please enter a different reference or contact a moderator.')
     elif status == 'duplicate':
         message = '❌ That order reference is already registered to another Guild member. Contact a moderator.'
     else:
@@ -2064,7 +2070,7 @@ def boost_milestone_message(gid: int, uid: int, currently_boosting: bool) -> str
             'to check your reward before boosting again.'
         )
     return (
-        '💎 **Boost GYMGUILD**\\n'
+        '💎 **Boost GYMGUILD**\n'
         'Discord does not allow bots to open the native Server Boost checkout window.\\n\\n'
         '**To boost this server:**\\n'
         '1. Click **GYMGUILD✦** at the top-left of the channel list.\\n'
