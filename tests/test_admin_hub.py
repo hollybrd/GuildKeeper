@@ -145,3 +145,70 @@ class AdminHubChannelSelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok, message)
         old_message.edit.assert_awaited_once()
         channel.send.assert_not_awaited()
+
+class PermanentPanelHealthTests(unittest.IsolatedAsyncioTestCase):
+    def test_status_report_labels_and_links(self):
+        import panel_health
+        report = panel_health.render([
+            {'name': 'Player Hub', 'state': 'current', 'detail': 'Current', 'url': None},
+            {'name': 'Milestone Quests', 'state': 'missing', 'detail': 'No recorded panel', 'url': None},
+            {'name': 'Admin Hub', 'state': 'outdated', 'detail': 'Old buttons', 'url': 'https://discord.com/channels/1/2/3'},
+        ])
+        self.assertIn('1/3', report)
+        self.assertIn('missing', report)
+        self.assertIn('View panel', report)
+
+    async def test_refresh_only_operates_on_missing_or_outdated_panels(self):
+        from unittest.mock import patch, AsyncMock
+        import panel_health
+        api = SimpleNamespace(GUILD_ID=1, QUESTS_CHANNEL_ID=123)
+        guild = SimpleNamespace(id=1)
+        status = [
+            {'name': 'Player Hub', 'state': 'current', 'detail': 'Current', 'url': None},
+            {'name': 'No Such Panel', 'state': 'unknown', 'detail': 'Cannot check', 'url': None},
+            {'name': 'Other', 'state': 'setup', 'detail': 'Missing configuration', 'url': None},
+        ]
+        with patch.object(panel_health, '_repair_weekly', new=AsyncMock()) as repair:
+            results = await panel_health.repair(api, guild, status)
+        self.assertEqual(results, [])
+        repair.assert_not_awaited()
+
+    async def test_mismatched_button_ids_are_outdated(self):
+        from unittest.mock import patch
+        import panel_health
+        class FakeTextChannel:
+            pass
+        channel = FakeTextChannel()
+        message = SimpleNamespace(
+            author=SimpleNamespace(id=456),
+            embeds=[],
+            components=[SimpleNamespace(children=[SimpleNamespace(custom_id='old-button')])])
+        channel.fetch_message = AsyncMock(return_value=message)
+        guild = SimpleNamespace(
+            id=1,
+            me=SimpleNamespace(id=456),
+            get_channel=lambda channel_id: channel)
+        channel.guild = guild
+        channel.id = 234
+        message.id = 789
+        expected_view = SimpleNamespace(children=[SimpleNamespace(custom_id='new-button')])
+        with patch.object(panel_health.discord, 'TextChannel', FakeTextChannel):
+            result = await panel_health._check_message(
+                guild, 'Player Hub', 234, 789, view=expected_view)
+        self.assertEqual(result['state'], 'outdated')
+
+    async def test_missing_message_does_not_delete_or_repost_unknown_panels(self):
+        import panel_health
+        unknown = [{'name': 'Starter Quests', 'state': 'unknown',
+                    'detail': 'Discord permission error', 'url': None}]
+        output = await panel_health.repair(SimpleNamespace(), SimpleNamespace(id=12), unknown)
+        self.assertEqual(output, [])
+
+    def test_admin_ui_has_status_and_refresh_with_confirmation(self):
+        import admin_hub
+        controls = [button.label for button in admin_hub.ControlMenu(123).children]
+        self.assertIn('Permanent Panels', controls)
+        screen = [button.label for button in admin_hub.PanelHealthMenu(123).children]
+        self.assertEqual(screen, ['Check Again', 'Refresh Panels'])
+        confirmation = [button.label for button in admin_hub.ConfirmPanelRefresh(123).children]
+        self.assertEqual(confirmation, ['Confirm Refresh', 'Cancel'])
