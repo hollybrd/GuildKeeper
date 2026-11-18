@@ -21,6 +21,21 @@ class NotificationTests(unittest.TestCase):
         bot.DB = self.original_db
         self.tmp.cleanup()
 
+    def test_quest_progress_shows_active_or_inactive_pause(self):
+        self.assertIn('No active pause', bot.weekly_progress_text(self.gid, self.uid))
+        self.assertIn('No active pause', bot.starter_progress_text(self.gid, self.uid))
+        self.assertIn('No active pause', bot.milestone_quests_embed(self.gid, self.uid).fields[-1].value)
+        with bot.connect() as db:
+            db.execute('INSERT INTO pauses(guild_id,user_id,week_key,created_at) VALUES (?,?,?,?)',
+                       (self.gid, self.uid, bot.week_key(), bot.utc_now().isoformat()))
+        self.assertIn('Pause ACTIVE', bot.weekly_progress_text(self.gid, self.uid))
+        self.assertIn('no Weekly Side Quest XP', bot.starter_progress_text(self.gid, self.uid))
+        self.assertIn('Pause ACTIVE', bot.milestone_quests_embed(self.gid, self.uid).fields[-1].value)
+        with bot.connect() as db:
+            db.execute('INSERT INTO resumed_pauses(guild_id,user_id,week_key,resumed_at) VALUES (?,?,?,?)',
+                       (self.gid, self.uid, bot.week_key(), bot.utc_now().isoformat()))
+        self.assertIn('weekly XP earning has resumed', bot.weekly_progress_text(self.gid, self.uid))
+
     def test_dm_preference_defaults_enabled_and_persists(self):
         self.assertTrue(bot.bot_dms_enabled(self.gid, self.uid))
         bot.set_bot_dms(self.gid, self.uid, False)

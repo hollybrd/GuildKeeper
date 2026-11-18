@@ -1160,6 +1160,7 @@ def milestone_quests_embed(gid: int, uid: int) -> discord.Embed:
               else f'🔒 {progress["completed"]}/{progress["total"]} milestones completed',
         inline=False,
     )
+    embed.add_field(name='⏸️ Weekly XP Pause Status', value=quest_pause_notice(gid, uid), inline=False)
     embed.set_footer(text='Submit orders through the main Milestone Quests board.')
     return embed
 
@@ -1603,6 +1604,23 @@ class WeeklyTurnInView(discord.ui.View):
             ephemeral=True)
 
 
+def quest_pause_notice(gid: int, uid: int) -> str:
+    """Weekly quest XP status; milestone and Starter rewards are independent."""
+    wk = week_key()
+    if is_paused(gid, uid, wk):
+        return ('⏸️ **Pause ACTIVE — no Weekly Side Quest XP is earned while paused.** '
+                'Your streak is protected. Use **Pauses** in the Player Hub to resume '
+                'weekly XP; resuming does **not refund** the pause.')
+    with connect() as db:
+        used_this_week = db.execute(
+            'SELECT 1 FROM pauses WHERE guild_id=? AND user_id=? AND week_key=?',
+            (gid, uid, wk)).fetchone() is not None
+    if used_this_week:
+        return ('▶️ **No active pause — weekly XP earning has resumed.** '
+                'Your pause was used and cannot be refunded.')
+    return '✅ **No active pause — weekly quest XP earning is enabled.**'
+
+
 def weekly_progress_text(gid: int, uid: int) -> str:
     kinds = weekly_status(gid, uid, week_key())
     lines = [f'{"✅" if key in kinds else "⬜"} {name}' for key, name in WEEKLY_OBJECTIVES]
@@ -1610,7 +1628,7 @@ def weekly_progress_text(gid: int, uid: int) -> str:
     return ('⚔️ **Your Weekly Side Quest**\n' + '\n'.join(lines) +
             f'\n**{len(kinds)}/4 objectives completed.**\n' +
             ('🏆 **Automatically turned in!** Your completed week counts toward your streak.'
-             if complete else 'Complete all four to turn in automatically — no button required.'))
+             if complete else 'Complete all four to turn in automatically — no button required.') + '\n\n' + quest_pause_notice(gid, uid))
 
 
 @bot.tree.command(name='weekly_progress',description='See your four weekly quest objectives')
@@ -2041,7 +2059,7 @@ def starter_progress_text(gid: int, uid: int) -> str:
               ('intro', 'Introduction'), ('first_steps', 'First Steps')]
     lines = [f'{"✅" if key in claimed else "⬜"} {label} — {STARTER_REWARDS[key]} XP'
              for key, label in labels]
-    return '🛡️ **Your Starter Quest**\n' + '\n'.join(lines) + f'\n**{len(set(STARTER_REWARDS) & claimed)}/5 objectives completed.**'
+    return '🛡️ **Your Starter Quest**\n' + '\n'.join(lines) + f'\n**{len(set(STARTER_REWARDS) & claimed)}/5 objectives completed.**' + '\n\n' + quest_pause_notice(gid, uid)
 
 
 @bot.tree.command(name='starter_progress',description='See your one-time Starter Quest progress')
@@ -3545,6 +3563,7 @@ def all_quests_embed(guild: discord.Guild, uid: int) -> discord.Embed:
                f'🔒 Complete all six milestones for a one-time **+500 XP** bonus.')
               + '\n' + milestone_board_link(guild),
         inline=False)
+    embed.add_field(name='⏸️ Weekly XP Pause Status', value=quest_pause_notice(gid, uid), inline=False)
     embed.set_footer(text='Use Refresh to check your latest quest progress.')
     return embed
 
