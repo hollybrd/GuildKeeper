@@ -169,8 +169,9 @@ class AnnouncementSchedulerTests(unittest.IsolatedAsyncioTestCase):
 
     def test_admin_hub_exposes_schedule_management(self):
         labels=[b.label for b in admin_hub.AnnouncementMenu(101).children]
-        self.assertEqual(labels,["Schedule Message","Upcoming Messages",
-                                 "Automatic Notices","Compose Announcement"])
+        self.assertEqual(labels,["Open Scheduler Dashboard","Schedule Message",
+                                 "Upcoming Messages","Automatic Notices",
+                                 "Compose Announcement"])
         self.assertEqual(len(announcement_ui.ChooseChannel(101).children),1)
         self.assertEqual(len(announcement_ui.FrequencyMenu(101,123).children[0].options),4)
         self.assertEqual(len(announcement_ui.JobMenu(101,999).children),4)

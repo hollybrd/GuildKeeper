@@ -48,7 +48,9 @@ def _last_poll():
 
 # Compare visible product snapshots and send at most a few new/sale notices.
 async def tick():
-    if not enabled() or not api.ANNOUNCEMENTS_CHANNEL_ID:
+    policy_new=announcements_scheduler.automation_policy("shop_new")
+    policy_sale=announcements_scheduler.automation_policy("shop_sale")
+    if not (policy_new["enabled"] or policy_sale["enabled"]):
         return
     ensure_tables()
     now=api.utc_now()
@@ -102,9 +104,9 @@ async def tick():
         else:
             title="🏷️ GYMGUILD price update"
             body=f'**{item["title"]}** is now {item["price"]:.2f} GBP.\n{item["url"]}\n'
-        await announcements_scheduler.automatic_event(
-            f"shopify-{kind}-{item['id']}-{str(item['price'])}",
-            title,body,api.ANNOUNCEMENTS_CHANNEL_ID)
+        await announcements_scheduler.configured_notice(
+            "shop_new" if kind=="new" else "shop_sale",
+            f"shopify-{kind}-{item['id']}-{str(item['price'])}",title,body)
     if len(changes)>3:
         api.log.warning("Detected %s Shopify product changes; announced at most 3",len(changes))
 

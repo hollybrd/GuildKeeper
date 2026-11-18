@@ -44,6 +44,13 @@ def initialize():
           message_id INTEGER, error TEXT, created_at TEXT NOT NULL,
           PRIMARY KEY (guild_id, event_key)
         )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS scheduler_automations (
+          guild_id INTEGER NOT NULL, kind TEXT NOT NULL,
+          channel_id INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+          title TEXT NOT NULL DEFAULT '', intro TEXT NOT NULL DEFAULT '',
+          updated_by INTEGER NOT NULL, updated_at TEXT NOT NULL,
+          PRIMARY KEY (guild_id,kind)
+        )""")
 
 
 # Turn the moderator's typed date into a timezone-aware UK date; reject invalid clock-change times.
@@ -184,12 +191,12 @@ def get(job_id):
 
 
 # List active and historical schedules for the admin panel.
-def upcoming(limit=25):
+def upcoming(limit=25, offset=0):
     initialize()
     with api.connect() as db:
         return db.execute("""SELECT * FROM scheduled_announcements WHERE guild_id=?
          AND status!='deleted' ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END,
-         next_run_utc,id LIMIT ?""", (api.GUILD_ID,limit)).fetchall()
+         next_run_utc,id LIMIT ? OFFSET ?""", (api.GUILD_ID,limit,offset)).fetchall()
 
 
 # Edit an existing job in one database transaction, so partially saved data cannot leak.
@@ -291,6 +298,135 @@ def monthly_top_10(gid, start, end):
     return [(r["user_id"],r["total"]) for r in rows if r["total"] > 0]
 
 
+# Each event type can have one configured automation per Guild. Recurring
+# scheduled messages are separate and are stored in scheduled_announcements.
+AUTOMATION_KINDS = {
+    "weekly_quests": ("Weekly Side Quest refresh", "After the weekly quest board is posted"),
+    "monthly_leaderboard": ("Monthly leaderboard recap", "First day of each UK month"),
+    "shop_new": ("New Shopify product", "When a newly published product is detected"),
+    "shop_sale": ("Shopify sale or price drop", "When a product price reduction is detected"),
+}
+
+
+def automations():
+    initialize()
+    with api.connect() as db:
+        return db.execute(
+            "SELECT * FROM scheduler_automations WHERE guild_id=? ORDER BY kind",
+            (api.GUILD_ID,)).fetchall()
+
+
+def automation(kind):
+    if kind not in AUTOMATION_KINDS:
+        raise ValueError("Unknown automation type.")
+    initialize()
+    with api.connect() as db:
+        return db.execute(
+            "SELECT * FROM scheduler_automations WHERE guild_id=? AND kind=?",
+            (api.GUILD_ID,kind)).fetchone()
+
+
+def automation_policy(kind):
+    """New rules override existing defaults, preserving old behaviour until edited."""
+    row=automation(kind)
+    if row is not None:
+        return {"enabled":bool(row["enabled"]),"channel_id":row["channel_id"],
+                "title":row["title"],"intro":row["intro"],"configured":True}
+    shop_kind=kind in ("shop_new","shop_sale")
+    enabled=(api.shopify_events.enabled() if shop_kind else True)
+    return {"enabled":enabled,"channel_id":api.ANNOUNCEMENTS_CHANNEL_ID,
+            "title":"","intro":"","configured":False}
+
+
+def save_automation(kind,channel_id,title,intro,enabled,actor):
+    """One row per event type. Saving never triggers an announcement immediately."""
+    if kind not in AUTOMATION_KINDS:
+        raise ValueError("Unknown automation type.")
+    if not (1<=len(title.strip())<=100) or len(intro.strip())>500:
+        raise ValueError("Use a title (1-100 characters) and optional intro (up to 500).")
+    initialize()
+    with api.connect() as db:
+        db.execute("""INSERT INTO scheduler_automations
+          (guild_id,kind,channel_id,enabled,title,intro,updated_by,updated_at)
+          VALUES (?,?,?,?,?,?,?,?)
+          ON CONFLICT(guild_id,kind) DO UPDATE SET
+          channel_id=excluded.channel_id,enabled=excluded.enabled,
+          title=excluded.title,intro=excluded.intro,
+          updated_by=excluded.updated_by,updated_at=excluded.updated_at""",
+          (api.GUILD_ID,kind,channel_id,int(bool(enabled)),
+           discord.utils.escape_mentions(title.strip()),
+           discord.utils.escape_mentions(intro.strip()),
+           actor,api.utc_now().isoformat()))
+
+
+def set_automation_enabled(kind,enabled,actor):
+    """Only configured rules can be toggled; defaults must first be saved."""
+    with api.connect() as db:
+        cur=db.execute("""UPDATE scheduler_automations
+            SET enabled=?,updated_by=?,updated_at=? WHERE guild_id=? AND kind=?""",
+            (int(bool(enabled)),actor,api.utc_now().isoformat(),api.GUILD_ID,kind))
+        if not cur.rowcount:
+            raise ValueError("Create this automation before changing its status.")
+
+
+def delete_automation(kind):
+    with api.connect() as db:
+        db.execute("DELETE FROM scheduler_automations WHERE guild_id=? AND kind=?",
+                   (api.GUILD_ID,kind))
+
+
+async def configured_notice(kind,key,title,body):
+    """Post through the deduplication ledger after applying event settings."""
+    policy=automation_policy(kind)
+    if not policy["enabled"] or not policy["channel_id"]:
+        return False
+    if policy["title"]:
+        title=policy["title"]
+    if policy["intro"]:
+        body=policy["intro"]+"\n\n"+body
+    return await automatic_event(key,title,body,policy["channel_id"])
+
+
+def timeline(now=None,limit=15):
+    """Merge scheduled messages and predictable event cycles chronologically.
+
+    Shopify events have no fixed send date, so appear on the automation list.
+    """
+    now=now or api.utc_now()
+    entries=[]
+    for row in upcoming(limit=100):
+        if row["status"]!="active":
+            continue
+        due=datetime.fromisoformat(row["next_run_utc"])
+        if due<=now:
+            due=now
+        entries.append((due,f'#{row["id"]} {row["title"]}',row["recurrence"],
+                        row["channel_id"],"message"))
+        if row["recurrence"]!="once":
+            nxt=due
+            for _ in range(2):
+                nxt=next_occurrence(nxt.astimezone(TZ),row["recurrence"],
+                                    row["month_day"],now)
+                entries.append((nxt,f'#{row["id"]} {row["title"]}',row["recurrence"],
+                                row["channel_id"],"message"))
+    local=now.astimezone(TZ)
+    weekly=local.replace(hour=0,minute=0,second=0,microsecond=0)
+    weekly+=timedelta(days=(7-local.weekday())%7)
+    if weekly<=local:
+        weekly+=timedelta(days=7)
+    monthly=local.replace(day=1,hour=0,minute=0,second=0,microsecond=0)
+    month=monthly.month%12+1
+    year=monthly.year+(monthly.month//12)
+    monthly=monthly.replace(year=year,month=month)
+    for kind,due in (("weekly_quests",weekly),("monthly_leaderboard",monthly)):
+        policy=automation_policy(kind)
+        if policy["enabled"] and policy["channel_id"]:
+            entries.append((due,AUTOMATION_KINDS[kind][0],"automatic",
+                            policy["channel_id"],"automation"))
+    entries.sort(key=lambda x:(x[0],x[1]))
+    return entries[:limit]
+
+
 # Use a unique event key to prevent automatic notices duplicating across restarts.
 async def automatic_event(key, title, body, channel_id):
     """Exactly one attempt per event; uncertain sends require manual attention."""
@@ -330,7 +466,7 @@ async def run_automatic(now=None):
     initialize()
     now=now or api.utc_now()
     guild=api.bot.get_guild(api.GUILD_ID)
-    if guild is None or not api.ANNOUNCEMENTS_CHANNEL_ID:
+    if guild is None:
         return
     wk=api.week_key(now)
     with api.connect() as db:
@@ -339,10 +475,10 @@ async def run_automatic(now=None):
     if exists:
         quest_channel=guild.get_channel(api.QUESTS_CHANNEL_ID)
         quest_link=quest_channel.mention if quest_channel else "the Side Quest channel"
-        await automatic_event("weekly-refresh-"+wk,"⚔️ Weekly Side Quests refreshed",
+        await configured_notice("weekly_quests","weekly-refresh-"+wk,"⚔️ Weekly Side Quests refreshed",
             "A new week's objectives are ready in "+quest_link+
             ". Complete the four objectives to earn XP, build your streak and progress your rank.",
-            api.ANNOUNCEMENTS_CHANNEL_ID)
+            )
     local=now.astimezone(TZ)
     # Monthly leaderboard RECAP on the 1st; no deletion, reset, or change to lifetime XP.
     if local.day==1:
@@ -354,8 +490,9 @@ async def run_automatic(now=None):
         content=("Top XP earned last month:\n"+"\n".join(lines) if lines else
                  "No positive XP gains were recorded last month.")
         content+="\n\n**Lifetime XP and ranks do not reset.**"
-        await automatic_event("monthly-leaderboard-"+last_end.strftime("%Y-%m"),
-            "🏆 Monthly leaderboard recap",content,api.ANNOUNCEMENTS_CHANNEL_ID)
+        await configured_notice("monthly_leaderboard",
+            "monthly-leaderboard-"+last_end.strftime("%Y-%m"),
+            "🏆 Monthly leaderboard recap",content)
 
 
 # Count jobs that require human review, for the Admin Hub Health Check.

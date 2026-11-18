@@ -154,6 +154,13 @@ async def snapshot(api, guild):
         guild, 'Admin Hub', admin_channel, admin_message,
         embed=api.admin_hub.hub_embed(), view=api.admin_hub.AdminHubView()))
 
+    scheduler_channel, scheduler_message = _parse_location(
+        _saved_config(api, f'message-scheduler-panel-{gid}'), None)
+    checks.append(await _check_message(
+        guild, 'Message Scheduler', scheduler_channel, scheduler_message,
+        embed=api.message_scheduler_panel.dashboard_embed(),
+        view=api.message_scheduler_panel.SchedulerDashboard()))
+
     testing_channel, testing_message = _parse_location(
         _saved_config(api, f'testing-panel-post-{gid}'), None)
     checks.append(await _check_message(
@@ -360,6 +367,14 @@ async def repair(api, guild, states):
                     ok, info = await api.admin_hub.post_admin_hub(channel)
                 else:
                     ok, info = False, 'Admin Hub: original channel unavailable; skipped'
+            elif name == 'Message Scheduler':
+                channel_id, _ = _parse_location(
+                    _saved_config(api, f'message-scheduler-panel-{gid}'), None)
+                channel = guild.get_channel(channel_id) if channel_id else None
+                if isinstance(channel, discord.TextChannel):
+                    ok, info = await api.message_scheduler_panel.post_panel(channel)
+                else:
+                    ok, info = False, 'Message Scheduler: use /admin_scheduler_post in a private channel'
             elif name == 'Testing Cheats':
                 channel_id, _ = _parse_location(
                     _saved_config(api, f'testing-panel-post-{gid}'), None)

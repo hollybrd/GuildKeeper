@@ -183,10 +183,14 @@ async def run(api, guild):
         'Admin API credentials configured for private order verification and reward codes'
         if configured else 'Public shop browsing available; Admin API not configured '
         '(order verification and reward codes disabled)'))
+    store_notice_states = [
+        api.announcements_scheduler.automation_policy(kind)["enabled"]
+        for kind in ("shop_new", "shop_sale")
+    ]
     core.append(status(
         'Shopify store notices', 'current',
-        'Store announcements opted in (poll every 30 minutes)'
-        if api.shopify_events.enabled() else 'Off until SHOPIFY_AUTO_ANNOUNCE=1'))
+        f'{sum(store_notice_states)} of 2 product-event automations enabled. '
+        'Configure them in the permanent Message Scheduler panel.'))
     try:
         problems = api.announcements_scheduler.failed_count()
         core.append(status('Announcement deliveries',
