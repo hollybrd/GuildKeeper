@@ -1850,6 +1850,15 @@ def submit_purchase_order(gid: int, uid: int, reference: str) -> tuple[str, int 
                 return 'duplicate', None
             if row['status'] != 'rejected':
                 return row['status'], row['id']
+            # A rejected order may be resubmitted only if no other order
+            # is awaiting review for this same member.
+            other_pending = db.execute(
+                "SELECT id FROM purchase_orders WHERE guild_id=? AND user_id=? "
+                "AND status='pending' AND id!=?",
+                (gid, uid, row['id']),
+            ).fetchone()
+            if other_pending:
+                return 'pending', other_pending['id']
             db.execute(
                 "UPDATE purchase_orders SET status='pending',submitted_at=?,reviewed_at=NULL,reviewed_by=NULL "
                 'WHERE id=?', (utc_now().isoformat(), row['id']),
