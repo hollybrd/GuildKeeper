@@ -118,10 +118,10 @@ class PurchaseMilestoneTests(unittest.TestCase):
 
     def test_milestone_panel_and_reward_summary_do_not_give_unearned_xp(self):
         self.assertIn('Completed: 0/6', bot.milestone_quests_embed(self.gid, self.uid).description)
-        self.assertIn('Locked', bot.order_rewards_text(self.gid, self.uid))
+        self.assertIn('first order', bot.order_xp_embed(self.gid, self.uid).description)
         self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
         bot.submit_purchase_order(self.gid, self.uid, 'xyz')
-        self.assertIn('awaiting approval', bot.order_rewards_text(self.gid, self.uid))
+        self.assertTrue(any('awaiting approval' in field.value for field in bot.order_xp_embed(self.gid, self.uid).fields))
         self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
 
     def test_milestone_rewards_and_cancel_controls_match_display(self):
