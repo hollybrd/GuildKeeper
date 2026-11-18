@@ -1,4 +1,12 @@
-"""Order XP panel storage and moderator review regression tests."""
+"""Order XP panel storage and moderator review regression tests.
+
+READING GUIDE
+-------------
+Tests that purchase requests need a moderator decision, cannot double-award milestone XP, and do not erase other member rewards when reset.
+
+Each setUp() uses a temporary SQLite database rather than GuildKeeper's
+real player database. Assertions compare actual results with expected rules.
+"""
 import tempfile
 import unittest
 from datetime import timedelta
