@@ -5,6 +5,7 @@ No legacy admin slash commands are replaced.
 """
 import discord
 import panel_health
+import health_check
 from discord import app_commands
 
 api = None
@@ -75,6 +76,15 @@ class AdminHubView(discord.ui.View):
             audit_summary(), view=AuditMenu(interaction.user.id), ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none())
 
+    @discord.ui.button(label='Health Check', emoji='🩺', style=discord.ButtonStyle.primary,
+                       custom_id='guildkeeper:adminhub:health', row=1)
+    async def health_check(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)
+        report = await health_check.run(api, interaction.guild)
+        await interaction.followup.send(
+            embed=health_check.render(report), view=HealthCheckMenu(interaction.user.id),
+            ephemeral=True)
+
     @discord.ui.button(label='Bot Controls', emoji='⚙️', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:adminhub:controls', row=1)
     async def controls(self, interaction, button):
@@ -93,7 +103,8 @@ def hub_embed():
         ('🎟️ Rewards & Orders', 'Review outstanding requests in the existing moderator channel.'),
         ('📣 Announcements', 'Compose, preview and publish without pings.'),
         ('📋 Audit Log', 'Inspect Admin Hub changes.'),
-        ('⚙️ Bot Controls', 'Permanent panel health, Player Hub refresh, leaderboard and rank syncing.'),
+        ('⚙️ Bot Controls', 'Refresh panels, leaderboard and rank roles.'),
+        ('🩺 Health Check', 'Check panels, runtime, database, permissions and configuration.'),
     ):
         embed.add_field(name=title, value=description, inline=False)
     embed.set_footer(text='Only staff with Manage Server permission can open the controls')
@@ -382,9 +393,20 @@ class ControlMenu(PrivateMenu):
             panel_health.render(checks), view=PanelHealthMenu(self.owner_id), ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none())
 
-    @discord.ui.button(label='Health Check', emoji='🔍', style=discord.ButtonStyle.secondary, row=1)
-    async def health(self, interaction, button):
-        await interaction.response.edit_message(content=health_summary(interaction.guild), view=self)
+class HealthCheckMenu(PrivateMenu):
+    @discord.ui.button(label='Check Again', emoji='🔄', style=discord.ButtonStyle.primary)
+    async def check(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)
+        report = await health_check.run(api, interaction.guild)
+        await interaction.edit_original_response(embed=health_check.render(report), view=self)
+
+    @discord.ui.button(label='Permanent Panels', emoji='🛡️', style=discord.ButtonStyle.secondary)
+    async def panels(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)
+        checks = await panel_health.snapshot(api, interaction.guild)
+        await interaction.followup.send(
+            panel_health.render(checks), view=PanelHealthMenu(self.owner_id),
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
 class PanelHealthMenu(PrivateMenu):
