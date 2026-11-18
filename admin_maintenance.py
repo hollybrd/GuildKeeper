@@ -127,6 +127,15 @@ async def reconcile(api, guild):
         'remaining': remaining,
     }
     _record(api, report)
+    if results:
+        try:
+            actor = getattr(getattr(api.bot, 'user', None), 'id', None) or 0
+            api.admin_hub.audit(
+                actor, 'automatic_panel_maintenance',
+                f"Automatic check: {report['updated']}/{report['attempted']} repaired; "
+                + '; '.join(msg for _, msg in results)[:500])
+        except Exception:
+            log.exception('Could not append automatic maintenance audit entry')
     log.info('Startup panel maintenance: %s updated/%s attempts; %s unresolved',
              report['updated'], report['attempted'], len(remaining))
     return report
