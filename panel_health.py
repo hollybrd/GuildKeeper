@@ -139,6 +139,12 @@ async def snapshot(api, guild):
         guild, 'Admin Hub', admin_channel, admin_message,
         embed=api.admin_hub.hub_embed(), view=api.admin_hub.AdminHubView()))
 
+    testing_channel, testing_message = _parse_location(
+        _saved_config(api, f'testing-panel-post-{gid}'), None)
+    checks.append(await _check_message(
+        guild, 'Testing Cheats', testing_channel, testing_message,
+        embed=api.testing_cheats.embed(), view=api.testing_cheats.TestingCheatsView()))
+
     checks.append(await _check_message(
         guild, 'Player Hub', api.PLAYER_STATS_CHANNEL_ID,
         _parse_location(_saved_config(api, f'player-stats-post-{gid}'),
@@ -329,6 +335,14 @@ async def repair(api, guild, states):
                     ok, info = await api.admin_hub.post_admin_hub(channel)
                 else:
                     ok, info = False, 'Admin Hub: original channel unavailable; skipped'
+            elif name == 'Testing Cheats':
+                channel_id, _ = _parse_location(
+                    _saved_config(api, f'testing-panel-post-{gid}'), None)
+                channel = guild.get_channel(channel_id) if channel_id else None
+                if isinstance(channel, discord.TextChannel):
+                    ok, info = await api.testing_cheats.post_testing_panel(channel)
+                else:
+                    ok, info = False, 'Testing Cheats: configure a private channel with /admin_testing_panel_post'
             elif name == 'Player Hub':
                 ok, info = await api.post_player_stats_hub()
             elif name == 'Leaderboard':

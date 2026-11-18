@@ -9,6 +9,7 @@ import sqlite3
 import sys
 
 import admin_hub
+import testing_cheats
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -486,6 +487,7 @@ class Guildkeeper(commands.Bot):
         self.add_view(WeeklyTurnInView())
         self.add_view(PlayerStatsView())
         self.add_view(admin_hub.AdminHubView())
+        self.add_view(testing_cheats.TestingCheatsView())
         self.add_view(MilestoneBoardView())
         self.add_view(RewardTicketAdminView())
         # Register outstanding review buttons after restarts.
@@ -4095,6 +4097,7 @@ async def on_app_command_error(interaction, error):
         log.exception('Could not deliver application command error response')
 
 admin_hub.install(sys.modules[__name__])
+testing_cheats.install(sys.modules[__name__])
 
 
 if __name__=='__main__':
