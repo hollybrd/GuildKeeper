@@ -195,6 +195,24 @@ class PurchaseMilestoneTests(unittest.TestCase):
             {'Refresh Progress'},
         )
 
+    def test_prior_milestone_claims_show_actual_historical_awards(self):
+        with bot.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.assertTrue(bot.grant_once(
+                db, 'milestone_claims', self.gid, self.uid, 'purchase1', 50))
+            self.assertTrue(bot.grant_once(
+                db, 'milestone_claims', self.gid, self.uid, 'boost1', 50))
+        summary = bot.purchase_order_summary(self.gid, self.uid)
+        self.assertTrue(summary['claimed'])
+        self.assertEqual(summary['earned_xp'], 50)
+        self.assertIn('50 XP granted', bot.order_xp_embed(self.gid, self.uid).fields[2].value)
+        self.assertIn('50 XP granted', bot.boost_milestone_message(self.gid, self.uid, True))
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 100)
+
+    def test_milestone_progress_links_to_public_submission(self):
+        embed = bot.milestone_quests_embed(self.gid, self.uid)
+        self.assertIn('main Milestone Quests board', embed.footer.text)
+
     def test_boost_button_guidance_and_earned_message(self):
         self.assertIn('Boost Server', {
             item.label for item in bot.MilestoneBoardView().children})
