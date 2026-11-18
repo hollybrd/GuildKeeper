@@ -994,7 +994,7 @@ def milestone_quests_embed(gid: int, uid: int) -> discord.Embed:
               else f'🔒 {progress["completed"]}/{progress["total"]} milestones completed',
         inline=False,
     )
-    embed.set_footer(text='Use Submit Order below for first-purchase verification.')
+    embed.set_footer(text='Submit orders through the main Milestone Quests board.')
     return embed
 
 
@@ -1783,11 +1783,17 @@ def purchase_order_summary(gid: int, uid: int) -> dict:
             "SELECT 1 FROM milestone_claims WHERE guild_id=? AND user_id=? AND kind='purchase1'",
             (gid, uid),
         ).fetchone() is not None
+        actual = db.execute(
+            "SELECT SUM(amount) AS total FROM xp_log "
+            "WHERE guild_id=? AND user_id=? AND reason='purchase1'",
+            (gid, uid),
+        ).fetchone()['total']
     return {
         'approved': sum(row['status'] == 'approved' for row in records),
         'pending': sum(row['status'] == 'pending' for row in records),
         'rejected': sum(row['status'] == 'rejected' for row in records),
-        'earned_xp': MILESTONE_XP['purchase1'] if earned else 0,
+        'claimed': earned,
+        'earned_xp': (actual or 0) if earned else 0,
         'potential_xp': MILESTONE_XP['purchase1'] if not earned and any(row['status'] == 'pending' for row in records) else 0,
         'orders': [dict(row) for row in records[:8]],
     }
@@ -1804,12 +1810,17 @@ def order_xp_embed(gid: int, uid: int) -> discord.Embed:
     )
     embed.add_field(name='✅ Approved orders', value=str(summary['approved']), inline=True)
     embed.add_field(name='⏳ Awaiting review', value=str(summary['pending']), inline=True)
-    embed.add_field(name='✦ Order XP earned', value=f"{summary['earned_xp']} / {MILESTONE_XP['purchase1']} XP", inline=True)
+    earned_label = (
+        f"{summary['earned_xp']} XP granted" if summary['earned_xp'] else
+        'Previously claimed' if summary['claimed'] else
+        '0 XP earned'
+    )
+    embed.add_field(name='✦ Order XP earned', value=earned_label, inline=True)
     embed.add_field(
         name='🎯 Potential XP',
         value=(f"+{summary['potential_xp']} XP awaiting approval"
                if summary['potential_xp'] else
-               'First-order reward already earned' if summary['earned_xp']
+               'First-order reward already claimed' if summary['claimed']
                else f'+{MILESTONE_XP["purchase1"]} XP available when your first order is approved'),
         inline=False,
     )
@@ -2059,8 +2070,15 @@ def boost_milestone_message(gid: int, uid: int, currently_boosting: bool) -> str
             (gid, uid),
         ).fetchone() is not None
     if awarded:
+        with connect() as db:
+            total = db.execute(
+                "SELECT SUM(amount) AS total FROM xp_log "
+                "WHERE guild_id=? AND user_id=? AND reason='boost1'",
+                (gid, uid),
+            ).fetchone()['total']
+        amount = f'{total} XP granted' if total is not None else 'XP reward claimed'
         return (
-            f'💎 **Boost milestone complete — {MILESTONE_XP["boost1"]} XP granted!** '
+            f'💎 **Boost milestone complete — {amount}!** '
             'Thank you for supporting GYMGUILD and helping our community grow. ✦'
         )
     if currently_boosting:
