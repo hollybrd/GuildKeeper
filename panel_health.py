@@ -145,6 +145,12 @@ async def snapshot(api, guild):
         guild, 'Testing Cheats', testing_channel, testing_message,
         embed=api.testing_cheats.embed(), view=api.testing_cheats.TestingCheatsView()))
 
+    shop_channel, shop_message = _parse_location(
+        _saved_config(api, f'shopify-shop-post-{gid}'), None)
+    checks.append(await _check_message(
+        guild, 'GYMGUILD Shop', shop_channel, shop_message,
+        embed=api.shopify_discord.shop_embed(), view=api.shopify_discord.ShopHub()))
+
     checks.append(await _check_message(
         guild, 'Player Hub', api.PLAYER_STATS_CHANNEL_ID,
         _parse_location(_saved_config(api, f'player-stats-post-{gid}'),
@@ -343,6 +349,14 @@ async def repair(api, guild, states):
                     ok, info = await api.testing_cheats.post_testing_panel(channel)
                 else:
                     ok, info = False, 'Testing Cheats: configure a private channel with /admin_testing_panel_post'
+            elif name == 'GYMGUILD Shop':
+                channel_id, _ = _parse_location(
+                    _saved_config(api, f'shopify-shop-post-{gid}'), None)
+                channel = guild.get_channel(channel_id) if channel_id else None
+                if isinstance(channel, discord.TextChannel):
+                    ok, info = await api.shopify_discord.post_shop_panel(channel)
+                else:
+                    ok, info = False, 'Shop: choose a channel with /admin_shop_post'
             elif name == 'Player Hub':
                 ok, info = await api.post_player_stats_hub()
             elif name == 'Leaderboard':
