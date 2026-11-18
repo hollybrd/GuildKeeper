@@ -193,21 +193,26 @@ class XPForm(discord.ui.Modal):
         if amount < 1 or amount > 500 or not reason:
             return await interaction.response.send_message(
                 'Please provide 1–500 XP and a nonempty reason.', ephemeral=True)
+        current_xp = api.get_xp(interaction.guild_id, self.target_id)
+        signed = amount * self.sign
+        projected = max(0, current_xp + signed)
         await interaction.response.send_message(
             '⚠️ **Confirm XP change**\n'
             + 'Member ID: ' + str(self.target_id) + '\n'
-            + 'Change: **' + str(self.sign * amount) + ' XP**\n'
-            + 'Reason: ' + discord.utils.escape_mentions(reason) + '\n'
-            + 'Current balance: ' + str(api.get_xp(interaction.guild_id, self.target_id))
-            + ' XP\n\n**This may change the member’s rank.**',
-            view=ConfirmXP(self.owner_id, self.target_id, amount * self.sign, reason),
+            + 'Requested change: **' + str(signed) + ' XP**\n'
+            + 'Actual change: **' + str(projected - current_xp) + ' XP**\n'
+            + 'Balance: **' + str(current_xp) + ' → ' + str(projected) + ' XP**\n'
+            + 'Reason: ' + discord.utils.escape_mentions(reason)
+            + '\n\n**This may change the member’s rank.**',
+            view=ConfirmXP(self.owner_id, self.target_id, signed, reason, current_xp),
             ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
 class ConfirmXP(PrivateMenu):
-    def __init__(self, owner_id, target_id, amount, reason):
+    def __init__(self, owner_id, target_id, amount, reason, expected_xp=None):
         super().__init__(owner_id)
         self.target_id, self.amount, self.reason = target_id, amount, reason
+        self.expected_xp = expected_xp
         self.used = False
 
     @discord.ui.button(label='Confirm XP Change', emoji='✅', style=discord.ButtonStyle.danger)
@@ -223,6 +228,10 @@ class ConfirmXP(PrivateMenu):
         if member.bot:
             return await interaction.edit_original_response(content='Cannot adjust bot XP.', view=None)
         before = api.get_xp(interaction.guild_id, self.target_id)
+        if self.expected_xp is not None and before != self.expected_xp:
+            return await interaction.edit_original_response(
+                content='⚠️ Member XP changed since your preview. No change made. '
+                        'Reopen the action to confirm the new balance.', view=None)
         xp = api.add_xp(interaction.guild_id, self.target_id, self.amount,
                         'Moderator ' + str(interaction.user.id) + ': ' + self.reason)
         rank_updated = await api.update_rank(member, xp)
@@ -337,8 +346,10 @@ def audit_summary():
     lines = ['📋 **Recent Admin Hub Changes**']
     for row in rows:
         detail = discord.utils.escape_mentions(row['details'])[:120]
-        lines.append(row['created_at'][:16] + ' · actor ' + str(row['actor_id'])
-                     + ' · ' + row['action'] + ' · ' + detail)
+        target = (' · target ' + str(row['target_id'])) if row['target_id'] else ''
+        lines.append('**' + row['created_at'][:16].replace('T', ' ') + ' UTC**'
+                     + ' · moderator ' + str(row['actor_id']) + target
+                     + '\n**' + row['action'].replace('_', ' ').title() + '** — ' + detail)
     return '\n'.join(lines)[:1900]
 
 
