@@ -1,3 +1,6 @@
+# GuildKeeper deployment — manual trigger only. This workflow updates the Oracle server.
+# Important: changing GitHub code by itself does NOT redeploy the running Discord bot.
+# The process below preserves the real player database and rolls back on failure.
 
 name: Deploy GuildKeeper
 
@@ -17,6 +20,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
+      # Use the GitHub Actions secrets to connect securely to Oracle; no private keys in code.
       - name: Configure SSH
         env:
           SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
@@ -34,6 +38,8 @@ jobs:
           printf '%s\n' "$ORACLE_HOST_KEY" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
+      # The entire .env is stored in the GUILDKEEPER_ENV secret and checked before upload.
+      # Keep old Discord keys when adding SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET.
       - name: Validate and transfer configuration
         env:
           GUILDKEEPER_ENV: ${{ secrets.GUILDKEEPER_ENV }}
@@ -100,6 +106,9 @@ jobs:
               "$TEMP_ENV" \
               "$ORACLE_USER@$ORACLE_HOST:/home/ubuntu/guildkeeper-env-pending"
 
+      # Backup the live SQLite database and configuration, fast-forward main,
+      # install dependencies, replace the environment, restart systemd, and
+      # restore the previous version automatically if the deployment fails.
       - name: Deploy code and configuration
         env:
           ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
