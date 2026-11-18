@@ -1828,7 +1828,7 @@ def order_xp_embed(gid: int, uid: int) -> discord.Embed:
             f"{order['status'].title()}"
             for order in summary['orders']
         ]
-        embed.add_field(name='Your submitted orders (latest 8)', value='\\n'.join(lines), inline=False)
+        embed.add_field(name='Your submitted orders (latest 8)', value='\n'.join(lines), inline=False)
     else:
         embed.add_field(name='Your submitted orders', value='No orders submitted yet.', inline=False)
     embed.set_footer(text='Only GuildKeeper submissions are counted — not all Shopify orders.')
@@ -1926,8 +1926,8 @@ async def post_purchase_review(guild: discord.Guild, user_id: int, order_id: int
         discord.utils.escape_markdown(row['order_reference']))
     embed = discord.Embed(
         title='🛍️ ORDER XP — REVIEW REQUIRED',
-        description=(f'Member: <@{user_id}>\\nOrder reference: **{reference}**\\n'
-                     'Check this order in Shopify before approving.\\n'
+        description=(f'Member: <@{user_id}>\nOrder reference: **{reference}**\n'
+                     'Check this order in Shopify before approving.\n'
                      '**First approved order: +50 XP. Subsequent orders: +0 XP.**'),
         colour=discord.Colour.from_rgb(104, 163, 153),
     )
@@ -2204,8 +2204,8 @@ async def admin_milestone_pending(interaction: discord.Interaction):
         for row in rows
     ]
     await interaction.response.send_message(
-        '🛍️ **Pending order reviews**\\n' + '\\n'.join(lines)
-        + '\\nUse the buttons in the moderator review channel, or /admin_milestone_review.',
+        '🛍️ **Pending order reviews**\n' + '\n'.join(lines)
+        + '\nUse the buttons in the moderator review channel, or /admin_milestone_review.',
         ephemeral=True, allowed_mentions=discord.AllowedMentions.none(),
     )
 
