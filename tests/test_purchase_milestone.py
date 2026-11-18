@@ -278,10 +278,16 @@ class PurchaseMilestoneTests(unittest.TestCase):
         self.assertEqual(
             [(button.label, button.row) for button in hub.children],
             [('Profile', None), ('Streak', None), ('Ranks', None),
-             ('Activate Pause', 1), ('Resume XP', 1),
+             ('Pauses', 1), ('Resume XP', 1),
              ('Inbox', 2), ('Bot DMs', 2), ('Claim Reward', 1),
              ('Guild Blast', 2)],
         )
+        pause_labels = [b.label for b in bot.PausePanelView(self.uid).children]
+        self.assertEqual(pause_labels, ['Activate Pause', 'Resume XP', 'Refresh'])
+        pause_display = bot.pause_panel_text(self.gid, self.uid)
+        self.assertIn('Pauses remaining:', pause_display)
+        self.assertIn('No active pause', pause_display)
+        self.assertIn('cannot be undone', pause_display)
         self.assertEqual(len(bot.PrivateProgressView(self.uid, 'profile').children), 1)
         self.assertEqual([b.label for b in bot.RankProfileButtonView(self.uid).children], ['View Rank'])
         self.assertLessEqual(len(hub.children), 25)
