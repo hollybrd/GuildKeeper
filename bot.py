@@ -1462,7 +1462,7 @@ async def pause_status(interaction:discord.Interaction):
 
 @bot.tree.command(name='streak',description='See your consecutive weekly completions')
 async def streak(interaction:discord.Interaction):
-    await reply(interaction,f'🔥 Completed weekly trials: **{completed_weeks(interaction.guild_id,interaction.user.id)}**\nCurrent closed-week streak: **{streak_length(interaction.guild_id,interaction.user.id)}**. Paused weeks preserve but do not increase it.')
+    await reply(interaction,f'🔥 Completed weekly trials: **{completed_weeks(interaction.guild_id,interaction.user.id)}**\nCurrent streak (including this week if complete): **{active_streak(interaction.guild_id,interaction.user.id)}**. Paused weeks preserve but do not increase it.')
 
 
 
@@ -3146,7 +3146,7 @@ def profile_progress_text(gid: int, uid: int, display_name: str) -> str:
 def streak_progress_text(gid: int, uid: int) -> str:
     return (
         f'🔥 **Your Weekly Streak** — Completed weeks: **{completed_weeks(gid, uid)}** '
-        f'· Current closed-week streak: **{streak_length(gid, uid)}**. '
+        f'· Current streak: **{active_streak(gid, uid)}**. '
         'Paused weeks preserve but do not increase your streak.'
     )
 
