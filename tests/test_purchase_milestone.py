@@ -284,6 +284,83 @@ class PurchaseMilestoneTests(unittest.TestCase):
         self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, 'test-1002')[0], 'approved')
         self.assertEqual(bot.get_xp(self.gid, self.uid), 250)
 
+    def test_admin_weekly_complete_once_and_uses_real_progress(self):
+        wk = bot.week_key()
+        with bot.connect() as db:
+            db.execute('INSERT INTO weekly_actions VALUES (?,?,?,?,?,?,?,?)',
+                       (self.gid, self.uid, wk, 'gym', wk, 555,
+                        'real-gym-fingerprint', bot.utc_now().isoformat()))
+            bot.add_xp(self.gid, self.uid, 25, 'Weekly ' + wk + ' gym', db)
+        first = bot.admin_complete_weekly_test(self.gid, self.uid)
+        self.assertEqual(first['objectives'], 3)
+        self.assertTrue(first['completion'])
+        self.assertFalse(first['paused'])
+        self.assertEqual(bot.weekly_status(self.gid, self.uid, wk),
+                         set(bot.WEEKLY_TEST_XP))
+        self.assertEqual(bot.completed_weeks(self.gid, self.uid), 1)
+        self.assertEqual(bot.active_streak(self.gid, self.uid), 1)
+        expected = 200 + 25 + 10
+        self.assertEqual(bot.get_xp(self.gid, self.uid), expected)
+        again = bot.admin_complete_weekly_test(self.gid, self.uid)
+        self.assertEqual(again['objectives'], 0)
+        self.assertFalse(again['completion'])
+        self.assertEqual(bot.get_xp(self.gid, self.uid), expected)
+        self.assertEqual(bot.completed_weeks(self.gid, self.uid), 1)
+
+    def test_admin_weekly_autocomplete_refuses_paused_week(self):
+        wk = bot.week_key()
+        with bot.connect() as db:
+            db.execute('INSERT INTO pauses VALUES (?,?,?,?)',
+                       (self.gid, self.uid, wk, bot.utc_now().isoformat()))
+        self.assertTrue(bot.admin_complete_weekly_test(self.gid, self.uid)['paused'])
+        self.assertEqual(bot.weekly_status(self.gid, self.uid, wk), set())
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
+
+    def test_admin_starter_autocomplete_is_idempotent_and_does_not_add_messages(self):
+        first = bot.admin_complete_starter_test(self.gid, self.uid)
+        self.assertEqual(first, {'objectives': 5, 'turnin': True})
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 50)
+        self.assertEqual(bot.admin_complete_starter_test(self.gid, self.uid),
+                         {'objectives': 0, 'turnin': False})
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 50)
+        self.assertEqual(bot.starter_progress_text(self.gid, self.uid).count('✅'), 5)
+        with bot.connect() as db:
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM starter_turnins WHERE guild_id=? AND user_id=?',
+                (self.gid, self.uid)).fetchone()[0], 1)
+
+    def test_admin_milestone_complete_gives_six_objectives_and_bonus_once(self):
+        initial = bot.admin_complete_milestones_test(self.gid, self.uid)
+        self.assertFalse(initial['blocked'])
+        self.assertEqual(set(initial['awarded']),
+                         {kind for kind, _, _, _ in bot.MILESTONE_QUESTS})
+        self.assertTrue(initial['completion'])
+        expected = sum(xp for _, _, xp, _ in bot.MILESTONE_QUESTS) + 500
+        self.assertEqual(bot.get_xp(self.gid, self.uid), expected)
+        self.assertEqual(bot.milestone_progress(self.gid, self.uid)['completed'], 6)
+        self.assertEqual(bot.order_submission_status(self.gid, self.uid), 'approved')
+        self.assertEqual(bot.purchase_order_summary(self.gid, self.uid)['approved'], 1)
+        result = bot.admin_complete_milestones_test(self.gid, self.uid)
+        self.assertEqual(result['awarded'], [])
+        self.assertFalse(result['completion'])
+        self.assertEqual(bot.get_xp(self.gid, self.uid), expected)
+
+    def test_admin_milestones_refuses_pending_order_without_changes(self):
+        _, oid = bot.submit_purchase_order(self.gid, self.uid, 'test-order')
+        result = bot.admin_complete_milestones_test(self.gid, self.uid)
+        self.assertTrue(result['blocked'])
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
+        self.assertEqual(bot.milestone_progress(self.gid, self.uid)['completed'], 0)
+        self.assertEqual(bot.review_purchase_order(self.gid, oid, 11, True)[0], 'awarded')
+
+    def test_admin_quest_autocompletion_only_changes_selected_account(self):
+        bot.admin_complete_weekly_test(self.gid, self.uid)
+        bot.admin_complete_starter_test(self.gid, self.uid)
+        bot.admin_complete_milestones_test(self.gid, self.uid)
+        self.assertEqual(bot.get_xp(self.gid, self.uid + 1), 0)
+        self.assertEqual(bot.completed_weeks(self.gid, self.uid + 1), 0)
+        self.assertEqual(bot.milestone_progress(self.gid, self.uid + 1)['completed'], 0)
+
     def test_streak_resets_on_missed_week_and_pause_preserves_count(self):
         from datetime import timedelta
         from unittest.mock import patch
