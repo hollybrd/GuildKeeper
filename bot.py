@@ -3796,12 +3796,154 @@ async def admin_leaderboard_update(interaction: discord.Interaction):
     await interaction.followup.send(('✅ ' if ok else '⚠️ ') + message, ephemeral=True)
 
 
+BOT_DM_FOOTER = (
+    'Manage these reminders anytime: open the GYMGUILD Player Hub → Bot DMs → Turn Off.'
+)
+
+
+def bot_dm_reminder_kind(now: datetime | None = None) -> str | None:
+    """Saturday / Sunday from 09:00 UK local time, respecting BST/GMT."""
+    local = (now or utc_now()).astimezone(TZ)
+    if local.hour < 9:
+        return None
+    return {5: 'streak', 6: 'xp'}.get(local.weekday())
+
+
+def bot_dm_reminder_message(kind: str, streak: int, objectives: int) -> str:
+    if kind == 'streak':
+        return (
+            '🔥 **Your GYMGUILD streak is at risk!**\\n'
+            f'You currently have a **{streak}-week streak**, but this week’s '
+            f'Side Quest is only **{objectives}/4 complete**. The next quest '
+            'reset is **Monday at 00:00 UK time**. Complete all four objectives '
+            'before then or activate an available pause to protect your streak.\\n\\n'
+            + BOT_DM_FOOTER
+        )
+    if kind == 'xp':
+        return (
+            '⚠️ **GYMGUILD XP reminder**\\n'
+            'You have **0/4 Weekly Side Quest objectives** recorded this week. '
+            'At the **Monday 00:00 UK reset**, an unpaused week with zero '
+            'qualifying objectives incurs a **25 XP inactivity deduction** '
+            '(your total cannot drop below 0). Completing **any one** qualifying '
+            'objective or activating a pause avoids that deduction.\\n\\n'
+            + BOT_DM_FOOTER
+        )
+    raise ValueError('Unsupported reminder kind')
+
+
+def bot_dm_reminder_candidates(gid: int, now: datetime | None = None) -> list[dict]:
+    """Return only members currently eligible for the daily reminder.
+
+    This is a read-only selection pass; the send path rechecks preferences
+    and uses a unique DB key to prevent duplicate messages after restarts.
+    """
+    kind = bot_dm_reminder_kind(now)
+    if kind is None:
+        return []
+    wk = week_key(now)
+    with connect() as db:
+        user_ids = [row['user_id'] for row in db.execute(
+            'SELECT user_id FROM members WHERE guild_id=?', (gid,))]
+    eligible = []
+    for uid in user_ids:
+        if not bot_dm_enabled(gid, uid) or is_paused(gid, uid, wk):
+            continue
+        objectives = len(weekly_status(gid, uid, wk) & set(WEEKLY_TEST_XP))
+        if kind == 'streak':
+            prior_streak = active_streak(gid, uid)
+            if objectives >= 4 or prior_streak <= 0:
+                continue
+        else:
+            if objectives != 0 or get_xp(gid, uid) <= 0:
+                continue
+            prior_streak = 0
+        eligible.append({
+            'guild_id': gid, 'user_id': uid, 'week_key': wk,
+            'kind': kind, 'streak': prior_streak, 'objectives': objectives,
+        })
+    return eligible
+
+
+def claim_bot_dm_reminder(gid: int, uid: int, wk: str, kind: str) -> bool:
+    """Atomically claim one reminder; opt-out and completion rechecked."""
+    if kind not in ('xp', 'streak'):
+        return False
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        pref = db.execute(
+            'SELECT enabled FROM bot_dm_preferences WHERE guild_id=? AND user_id=?',
+            (gid, uid),
+        ).fetchone()
+        if pref is not None and not pref['enabled']:
+            return False
+        paused = db.execute(
+            'SELECT 1 FROM pauses p WHERE p.guild_id=? AND p.user_id=? AND p.week_key=? '
+            'AND NOT EXISTS (SELECT 1 FROM resumed_pauses r '
+            'WHERE r.guild_id=p.guild_id AND r.user_id=p.user_id AND r.week_key=p.week_key)',
+            (gid, uid, wk),
+        ).fetchone()
+        if paused:
+            return False
+        objectives = db.execute(
+            'SELECT COUNT(*) AS n FROM weekly_actions WHERE guild_id=? AND user_id=? '
+            'AND week_key=? AND kind IN (\'training1\',\'training2\',\'gym\',\'hobby\')',
+            (gid, uid, wk),
+        ).fetchone()['n']
+        if kind == 'xp' and objectives:
+            return False
+        if kind == 'streak' and objectives >= 4:
+            return False
+        return bool(db.execute(
+            'INSERT OR IGNORE INTO bot_dm_reminders '
+            '(guild_id,user_id,week_key,reminder_kind,attempted_at,status) '
+            "VALUES (?,?,?,?,?,'attempted')",
+            (gid, uid, wk, kind, utc_now().isoformat()),
+        ).rowcount)
+
+
+async def send_weekly_bot_dm_reminders(now: datetime | None = None) -> dict:
+    """No public announcements or @mentions; ignore Discord-disabled DMs."""
+    kind = bot_dm_reminder_kind(now)
+    stats = {'kind': kind, 'sent': 0, 'blocked': 0}
+    if kind is None:
+        return stats
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        return stats
+    for candidate in bot_dm_reminder_candidates(GUILD_ID, now):
+        member = guild.get_member(candidate['user_id'])
+        if member is None or member.bot:
+            continue
+        if not claim_bot_dm_reminder(
+            GUILD_ID, member.id, candidate['week_key'], candidate['kind']
+        ):
+            continue
+        status = 'sent'
+        try:
+            await member.send(bot_dm_reminder_message(
+                candidate['kind'], candidate['streak'], candidate['objectives']))
+            stats['sent'] += 1
+        except (discord.Forbidden, discord.HTTPException):
+            status = 'blocked'
+            stats['blocked'] += 1
+            log.info('GuildKeeper reminder DM unavailable for user %s', member.id)
+        with connect() as db:
+            db.execute(
+                'UPDATE bot_dm_reminders SET status=? WHERE guild_id=? '
+                'AND user_id=? AND week_key=? AND reminder_kind=?',
+                (status, GUILD_ID, member.id, candidate['week_key'], candidate['kind']),
+            )
+    return stats
+
+
 @tasks.loop(minutes=1)
 async def scheduler():
     await settle_previous_weeks()
     await post_weekly_board()
     await update_permanent_leaderboard()
     await expire_reward_tickets()
+    await send_weekly_bot_dm_reminders()
 
 @scheduler.before_loop
 async def before_scheduler():
