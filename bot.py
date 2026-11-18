@@ -3555,6 +3555,18 @@ class PlayerStatsView(discord.ui.View):
             'Choose below to change your preference.',
             view=GuildBlastToggleView(interaction.user.id), ephemeral=True)
 
+    @discord.ui.button(label='Bot DMs', emoji='✉️', style=discord.ButtonStyle.secondary,
+                       custom_id='guildkeeper:stats:bot_dms', row=1)
+    async def bot_dms_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID or not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message(
+                'This option is available only in GYMGUILD.', ephemeral=True)
+        enabled = bot_dm_enabled(interaction.guild_id, interaction.user.id)
+        await interaction.response.send_message(
+            bot_dm_preference_text(enabled),
+            view=BotDMToggleView(interaction.user.id), ephemeral=True,
+        )
+
     @discord.ui.button(label='Milestone Quests', emoji='🏆', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:stats:milestone_quests', row=2)
     async def milestone_quests_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3573,6 +3585,36 @@ class PlayerStatsView(discord.ui.View):
         await interaction.response.send_message(
             guild_rewards_progress_text(interaction.guild_id, interaction.user.id),
             view=RewardChoiceView(interaction.user.id), ephemeral=True)
+
+
+class BotDMToggleView(discord.ui.View):
+    """A private user-owned menu; only its owner can change their reminders."""
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                'These notification settings belong to another member.', ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='Turn On', emoji='🔔', style=discord.ButtonStyle.success)
+    async def enable(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID:
+            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
+        set_bot_dm_enabled(interaction.guild_id, interaction.user.id, True)
+        await interaction.response.edit_message(
+            content=bot_dm_preference_text(True), view=self)
+
+    @discord.ui.button(label='Turn Off', emoji='🔕', style=discord.ButtonStyle.secondary)
+    async def disable(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID:
+            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
+        set_bot_dm_enabled(interaction.guild_id, interaction.user.id, False)
+        await interaction.response.edit_message(
+            content=bot_dm_preference_text(False), view=self)
 
 
 class GuildBlastToggleView(discord.ui.View):
