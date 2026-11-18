@@ -22,10 +22,10 @@ def options(api, category):
     if category == 'weekly':
         return [('all', 'All remaining objectives')] + [
             (key, label) for key, label in (
-                ('training1', 'First Flame — Training 1'),
-                ('training2', 'Fuel the Fire — Training 2'),
-                ('gym', 'Flex Text — Gym Chat'),
-                ('hobby', 'Skill Share — Hobby Chat'))]
+                ('training1', 'First Flame  -  Training 1'),
+                ('training2', 'Fuel the Fire  -  Training 2'),
+                ('gym', 'Flex Text  -  Gym Chat'),
+                ('hobby', 'Skill Share  -  Hobby Chat'))]
     if category == 'starter':
         return [('all', 'All remaining objectives')] + [
             (kind, {'intro': 'Introduce Yourself',
@@ -182,9 +182,9 @@ async def apply_to_member(api, member, category, choice, actor_id):
             elif role is None:
                 role_note = '\n⚠️ Starter access role is not configured.'
     await api.update_rank(member, api.get_xp(gid, uid))
-    note = (f'✅ **ADMIN TEST — {category.title()} Quest**\n'
+    note = (f'✅ **ADMIN TEST  -  {category.title()} Quest**\n'
             f'New objectives completed: **{len(missing)}**'
-            + (f' ({", ".join(missing)})' if missing else ' — already completed')
+            + (f' ({", ".join(missing)})' if missing else '  -  already completed')
             + f'\nObjective and weekly-completion XP: **{xp}**.'
             + '\nAdditional automatic Starter/Milestone bonuses may also have been granted.'
             + role_note)
