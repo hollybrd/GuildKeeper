@@ -251,10 +251,10 @@ class TestingCheatsTests(unittest.TestCase):
         view = testing_cheats.TestingCheatsView()
         self.assertTrue(view.is_persistent())
         self.assertEqual([item.label for item in view.children],
-                         ['Add / Remove XP', 'Starter Reset', 'Weekly Reset',
+                         ['Add / Remove XP', 'Complete Quest', 'Starter Reset', 'Weekly Reset',
                           'Add / Remove Streak', 'Pause Reset', 'Rank Test Reset',
                           'Reward Reset', 'Milestone Reset', 'All Test Commands'])
-        self.assertEqual([b.row for b in view.children], [0,0,0,1,1,1,2,2,2])
+        self.assertEqual([b.row for b in view.children], [0,0,0,0,1,1,1,2,2,2])
 
     def test_member_actions_require_confirmation(self):
         import testing_cheats
@@ -293,3 +293,91 @@ class CheatImprovementsTests(unittest.TestCase):
         view = bot.PlayerStatsView()
         primary = [b.label for b in view.children if b.style == ButtonStyle.primary]
         self.assertEqual(primary, ['Claim Reward'])
+
+
+class QuestCompletionCheatsTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.temp = tempfile.TemporaryDirectory()
+        self.old_db = bot.DB
+        bot.DB = Path(self.temp.name) / 'quest-cheats.db'
+        bot.setup_db()
+        self.gid, self.uid = 76543, 66532
+
+    def tearDown(self):
+        bot.DB = self.old_db
+        self.temp.cleanup()
+
+    def test_quest_completion_has_member_category_objective_confirmation(self):
+        import testing_cheats
+        view = testing_cheats.TestingCheatsView()
+        self.assertIn('Complete Quest', [button.label for button in view.children])
+        chooser = testing_cheats.QuestCategoryView(100, self.uid)
+        self.assertEqual([x.value for x in chooser.children[0].options],
+                         ['weekly', 'starter', 'milestone'])
+        objective = testing_cheats.QuestObjectiveView(100, self.uid, 'weekly')
+        self.assertEqual(len(objective.children[0].options), 5)
+        self.assertEqual([x.label for x in testing_cheats.ConfirmQuestCompletion(
+            100, self.uid, 'weekly', 'all').children],
+                         ['Confirm Test Completion', 'Cancel'])
+
+    def test_weekly_full_completion_awards_exactly_once_and_first_week(self):
+        import quest_testing
+        before = bot.get_xp(self.gid, self.uid)
+        missing, award, complete = quest_testing.complete(
+            bot, self.gid, self.uid, 'weekly', 'all', 111)
+        self.assertEqual(len(missing), 4)
+        self.assertEqual(award, 200)
+        self.assertTrue(complete)
+        # Weekly 200 + first weekly milestone 25 + Starter First Steps 10.
+        self.assertEqual(bot.get_xp(self.gid, self.uid) - before, 235)
+        self.assertEqual(len(bot.weekly_status(self.gid, self.uid, bot.week_key())), 4)
+        second = quest_testing.complete(bot, self.gid, self.uid, 'weekly', 'all', 111)
+        self.assertEqual(second, ([], 0, False))
+        self.assertEqual(bot.get_xp(self.gid, self.uid) - before, 235)
+
+    def test_partial_weekly_completion_then_rest_does_not_reaward(self):
+        import quest_testing
+        first = quest_testing.complete(bot, self.gid, self.uid, 'weekly', 'training1', 123)
+        self.assertEqual(first[1], 50)
+        second = quest_testing.complete(bot, self.gid, self.uid, 'weekly', 'all', 123)
+        self.assertEqual(second[1], 150)
+        self.assertEqual(len(second[0]), 3)
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 235)
+
+    def test_weekly_cheat_respects_active_pause(self):
+        import quest_testing
+        with bot.connect() as db:
+            db.execute('INSERT INTO pauses VALUES (?,?,?,?)',
+                       (self.gid, self.uid, bot.week_key(), bot.utc_now().isoformat()))
+        with self.assertRaisesRegex(ValueError, 'paused'):
+            quest_testing.complete(bot, self.gid, self.uid, 'weekly', 'all', 123)
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
+
+    def test_starter_full_turns_in_and_does_not_duplicate(self):
+        import quest_testing
+        result = quest_testing.complete(bot, self.gid, self.uid, 'starter', 'all', 123)
+        self.assertEqual(result[:2], (list(bot.STARTER_REWARDS), 50))
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 50)
+        with bot.connect() as db:
+            self.assertIsNotNone(db.execute(
+                'SELECT 1 FROM starter_turnins WHERE guild_id=? AND user_id=?',
+                (self.gid, self.uid)).fetchone())
+        quest_testing.complete(bot, self.gid, self.uid, 'starter', 'all', 123)
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 50)
+
+    def test_milestone_admin_test_grants_one_time_rewards_and_completion(self):
+        import quest_testing
+        missing, base_xp, _ = quest_testing.complete(bot, self.gid, self.uid, 'milestone', 'all', 123)
+        self.assertEqual(len(missing), 6)
+        self.assertEqual(base_xp, sum(bot.MILESTONE_XP.values()))
+        self.assertEqual(bot.get_xp(self.gid, self.uid),
+                         sum(bot.MILESTONE_XP.values()) + bot.MILESTONE_COMPLETION_BONUS)
+        quest_testing.complete(bot, self.gid, self.uid, 'milestone', 'all', 123)
+        self.assertEqual(bot.get_xp(self.gid, self.uid),
+                         sum(bot.MILESTONE_XP.values()) + bot.MILESTONE_COMPLETION_BONUS)
+        with bot.connect() as db:
+            self.assertIsNone(db.execute(
+                'SELECT 1 FROM purchase_orders WHERE guild_id=? AND user_id=?',
+                (self.gid, self.uid)).fetchone())

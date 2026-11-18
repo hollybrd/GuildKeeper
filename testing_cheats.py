@@ -1,5 +1,6 @@
 """Permanent, private GuildKeeper testing shortcuts. Reuses existing commands."""
 import discord
+import quest_testing
 from discord import app_commands
 
 api = None
@@ -9,6 +10,7 @@ ACTIONS = {
     'pause_reset': ('Pause History Reset', 'admin_pause_reset'),
     'streak_add': ('Add Streak Weeks', 'admin_streak_add'),
     'streak_remove': ('Remove Credited Streak Weeks', None),
+    'complete_quest': ('Complete Quest (Test Only)', None),
     'rank_reset': ('Reset My Rank Test', 'admin_rank_test_reset'),
 }
 REWARD_RANKS = ('Master', 'Legend', 'Paragon')
@@ -54,6 +56,15 @@ class TestingCheatsView(discord.ui.View):
         await interaction.response.send_message(
             '⭐ Select a member for XP testing. Award or Remove XP requires a reason and confirmation.',
             view=api.admin_hub.PlayerPickerView(interaction.user.id), ephemeral=True)
+
+    @discord.ui.button(label='Complete Quest', emoji='✅', style=discord.ButtonStyle.primary,
+                       custom_id='guildkeeper:testing:complete_quest', row=0)
+    async def complete_quest(self, interaction, button):
+        await interaction.response.send_message(
+            '🧪 **Complete Quest — Admin Testing Only**\nChoose a player and then a quest category. '
+            'You can award one missing objective or all remaining objectives. '
+            'This changes real XP and quest progress; no purchase or boost verification is performed.',
+            view=CheatMemberPickerView(interaction.user.id, 'complete_quest'), ephemeral=True)
 
     @discord.ui.button(label='Starter Reset', emoji='🛡️', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:testing:starter', row=0)
@@ -148,11 +159,112 @@ def embed():
                     'in this Guild — not a simulation. Choose a shortcut, select a member, '
                     'and confirm before applying a reset. Use a test account where possible.',
         colour=discord.Colour.orange())
-    e.add_field(name='XP & Progress', value='Award/remove XP · Starter reset · Weekly reset · Add/remove credited streak weeks', inline=False)
+    e.add_field(name='XP & Progress', value='Complete Quest (test-only) · Award/remove XP · Starter reset · Weekly reset · Add/remove credited streak weeks', inline=False)
     e.add_field(name='Advanced', value='Pause history reset · Self-only rank/milestone resets · Rank reward reset', inline=False)
     e.add_field(name='Safety', value='All actions require Manage Server. Destructive actions need confirmation. '
                 'Existing admin commands are preserved.', inline=False)
     return e
+
+
+class QuestCategoryView(Private):
+    def __init__(self, owner_id, target_id):
+        super().__init__(owner_id)
+        self.target_id = target_id
+
+    @discord.ui.select(placeholder='Choose quest category', options=[
+        discord.SelectOption(label='Weekly Side Quest', value='weekly', emoji='⚔️'),
+        discord.SelectOption(label='Starter Quest', value='starter', emoji='🛡️'),
+        discord.SelectOption(label='Milestone Quests (TEST ONLY)', value='milestone', emoji='🏆'),
+    ])
+    async def category(self, interaction, select):
+        category = select.values[0]
+        await interaction.response.send_message(
+            '🧪 **' + category.title() + ' Quest** — choose an objective or complete all missing. '
+            'Already completed objectives will not grant XP again.',
+            view=QuestObjectiveView(self.owner_id, self.target_id, category), ephemeral=True)
+
+
+class QuestObjectiveSelect(discord.ui.Select):
+    def __init__(self, category):
+        choices = quest_testing.options(api, category)
+        super().__init__(
+            placeholder='Choose objective or all remaining', min_values=1, max_values=1,
+            options=[discord.SelectOption(label=label[:100], value=key) for key, label in choices])
+        self.category = category
+
+    async def callback(self, interaction):
+        if not permitted(interaction) or interaction.user.id != self.view.owner_id:
+            return await denied(interaction)
+        gid, uid = interaction.guild_id, self.view.target_id
+        if self.category == 'weekly' and api.is_paused(gid, uid, api.week_key()):
+            return await interaction.response.send_message(
+                '⏸️ This player has an active pause. Weekly XP cannot be earned while paused. '
+                'Resume XP first using the Pauses panel.', ephemeral=True)
+        choice = self.values[0]
+        missing, estimated_xp = quest_testing.preview(api, gid, uid, self.category, choice)
+        if not missing:
+            return await interaction.response.send_message(
+                '✅ These objectives are already complete. No XP will be awarded.', ephemeral=True)
+        description = {
+            'weekly': 'Weekly quest progress and completion bonuses will be credited.',
+            'starter': 'Completing all Starter objectives also turns in the quest and grants access.',
+            'milestone': ('TEST ONLY: Milestone claims will be marked complete without verifying '
+                          'a real store order, boost or streak. This can also award the one-time '
+                          'Main Quest completion bonus. Use a test account.'),
+        }[self.category]
+        await interaction.response.send_message(
+            '⚠️ **Confirm ADMIN TEST quest completion**\n'
+            f'Member: <@{uid}>\n'
+            f'Category: **{self.category.title()}**\n'
+            f'New objectives: **{", ".join(missing)}**\n'
+            f'Estimated objective + completion XP: **{estimated_xp}**\n'
+            + description
+            + '\n\n**This modifies real Guild XP and one-time quest claims.**',
+            view=ConfirmQuestCompletion(self.view.owner_id, uid, self.category, choice),
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+class QuestObjectiveView(Private):
+    def __init__(self, owner_id, target_id, category):
+        super().__init__(owner_id)
+        self.target_id = target_id
+        self.add_item(QuestObjectiveSelect(category))
+
+
+class ConfirmQuestCompletion(Private):
+    def __init__(self, owner_id, target_id, category, choice):
+        super().__init__(owner_id)
+        self.target_id, self.category, self.choice = target_id, category, choice
+        self.used = False
+
+    @discord.ui.button(label='Confirm Test Completion', emoji='✅', style=discord.ButtonStyle.danger)
+    async def complete(self, interaction, button):
+        if self.used:
+            return await interaction.response.send_message('Already processed.', ephemeral=True)
+        self.used = True
+        await interaction.response.defer(ephemeral=True)
+        try:
+            member = (interaction.guild.get_member(self.target_id)
+                      or await interaction.guild.fetch_member(self.target_id))
+            if member.bot:
+                raise ValueError('Bot accounts cannot complete test quests')
+            result = await quest_testing.apply_to_member(
+                api, member, self.category, self.choice, interaction.user.id)
+            api.admin_hub.audit(
+                interaction.user.id, 'testing_quest_completion',
+                f'Category {self.category}; objective {self.choice}; target {self.target_id}',
+                self.target_id)
+        except (ValueError, discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+            result = '⚠️ Quest completion not applied: ' + str(exc)
+        except Exception:
+            api.log.exception('Testing Cheats: quest completion failed')
+            result = '⚠️ Quest completion failed unexpectedly. Check bot logs before retrying.'
+        await interaction.edit_original_response(content=result, view=None)
+
+    @discord.ui.button(label='Cancel', emoji='✖️', style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self.used = True
+        await interaction.response.edit_message(content='Test quest completion cancelled.', view=None)
 
 
 class StreakChoiceView(Private):
@@ -203,6 +315,11 @@ class CheatUserSelect(discord.ui.UserSelect):
             return await interaction.response.send_message('Member unavailable.', ephemeral=True)
         if member.bot:
             return await interaction.response.send_message('Bot accounts are not valid testing targets.', ephemeral=True)
+        if self.action == 'complete_quest':
+            return await interaction.response.send_message(
+                '🧪 **Complete Quest — ' + discord.utils.escape_markdown(member.display_name)
+                + '**\nChoose Weekly, Starter or Milestone progress to test.',
+                view=QuestCategoryView(self.view.owner_id, member.id), ephemeral=True)
         if self.action in ('streak_add', 'streak_remove'):
             return await interaction.response.send_modal(StreakForm(interaction.user.id, member.id, self.action))
         if self.action == 'reward_reset':
