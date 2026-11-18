@@ -184,7 +184,12 @@ class VerifyOrderModal(discord.ui.Modal):
                 "An order can only be used for one member.",ephemeral=True)
         status, purchase_id=api.submit_purchase_order(
             api.GUILD_ID,interaction.user.id,verification["reference"])
-        if status not in ("submitted","pending"):
+        if status=="pending":
+            return await interaction.followup.send(
+                "⏳ You already have a pending purchase milestone request. "
+                "Wait for moderator review or cancel it before submitting another order.",
+                ephemeral=True)
+        if status!="submitted":
             messages={
                 "approved":"Your First Purchase milestone is already claimed.",
                 "duplicate":"This order has already been used for another member.",
@@ -203,8 +208,7 @@ class VerifyOrderModal(discord.ui.Modal):
             return await interaction.followup.send(
                 "Order already verified; contact a moderator if your request is pending.",
                 ephemeral=True)
-        if status=="submitted":
-            await api.post_purchase_review(interaction.guild,interaction.user.id,purchase_id)
+        await api.post_purchase_review(interaction.guild,interaction.user.id,purchase_id)
         await interaction.followup.send(
             "✅ Shopify confirms that your order number and checkout email match a "
             "**fully paid, uncancelled order**. Your First Purchase request is now "
