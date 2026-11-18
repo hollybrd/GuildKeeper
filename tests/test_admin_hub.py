@@ -188,6 +188,9 @@ class PermanentPanelHealthTests(unittest.IsolatedAsyncioTestCase):
             id=1,
             me=SimpleNamespace(id=456),
             get_channel=lambda channel_id: channel)
+        channel.guild = guild
+        channel.id = 234
+        message.id = 789
         expected_view = SimpleNamespace(children=[SimpleNamespace(custom_id='new-button')])
         with patch.object(panel_health.discord, 'TextChannel', FakeTextChannel):
             result = await panel_health._check_message(
