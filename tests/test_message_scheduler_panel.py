@@ -111,7 +111,8 @@ class SchedulerPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(core.upcoming(limit=8,offset=8)),8)
         self.assertIn("Page 2",announcement_ui.listing(1))
         self.assertIn("Previous Page",
-            [button.label for button in announcement_ui.UpcomingMenu(4,1).children])
+            [button.label for button in announcement_ui.UpcomingMenu(4,1).children
+             if isinstance(button,discord.ui.Button)])
         self.assertIn("Page 2",panel.timeline_text(page=1))
         self.assertEqual([b.label for b in panel.TimelineMenu(4).children],
                          ["Previous Page","Next Page"])
