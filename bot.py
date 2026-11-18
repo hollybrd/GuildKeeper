@@ -1212,7 +1212,8 @@ class WeeklyTurnInView(discord.ui.View):
         if interaction.guild_id != GUILD_ID:
             return await interaction.response.send_message('This quest belongs to another server.', ephemeral=True)
         await interaction.response.send_message(
-            weekly_progress_text(interaction.guild_id, interaction.user.id), ephemeral=True)
+            weekly_progress_text(interaction.guild_id, interaction.user.id),
+            view=PrivateProgressView(interaction.user.id, 'weekly'), ephemeral=True)
 
     @discord.ui.button(label='Turn In Quest', style=discord.ButtonStyle.success,
                        custom_id='guildkeeper:weekly:turn_in', emoji='⚔️')
@@ -1378,7 +1379,8 @@ class StarterTurnInView(discord.ui.View):
         if interaction.guild_id != GUILD_ID:
             return await interaction.response.send_message('This quest belongs to another server.', ephemeral=True)
         await interaction.response.send_message(
-            starter_progress_text(interaction.guild_id, interaction.user.id), ephemeral=True)
+            starter_progress_text(interaction.guild_id, interaction.user.id),
+            view=PrivateProgressView(interaction.user.id, 'starter'), ephemeral=True)
 
     @discord.ui.button(label='Turn In Quest', style=discord.ButtonStyle.success,
                        emoji='⚔️', custom_id='guildkeeper:starter:turn_in')
@@ -2796,11 +2798,11 @@ def profile_progress_text(gid: int, uid: int, display_name: str) -> str:
                 if next_rank else 'Maximum rank reached ✦')
     notice = streak_blocked_rank_notice(gid, uid, xp)
     return (
-        f'✦ **{display_name}** — Rank: **{rank_for(xp, gid, uid)}** · XP: **{xp}**\\n'
-        f'🎯 Lifetime objectives completed: **{lifetime_objectives(gid, uid)}**\\n'
-        f'Longest streak: **{longest_streak(gid, uid)} weeks**\\n\\n'
-        f'**Rewards**\\n{reward_eligibility_text(gid, uid)}\\n{upcoming}'
-        + ('\\n\\n' + notice if notice else '')
+        f'✦ **{display_name}** — Rank: **{rank_for(xp, gid, uid)}** · XP: **{xp}**\n'
+        f'🎯 Lifetime objectives completed: **{lifetime_objectives(gid, uid)}**\n'
+        f'Longest streak: **{longest_streak(gid, uid)} weeks**\n\n'
+        f'**Rewards**\n{reward_eligibility_text(gid, uid)}\n{upcoming}'
+        + ('\n\n' + notice if notice else '')
     )
 
 
@@ -2821,9 +2823,9 @@ def ranks_progress_embed(gid: int, uid: int) -> discord.Embed:
         embed.add_field(name=f'✦ {name}', value=requirement + reward, inline=False)
     embed.add_field(name='🔒 Rank & reward rules', value=(
         'Streak requirements must be met **while your streak is active**. '
-        'Paused weeks protect a streak but do not add to it.\\n\\n'
+        'Paused weeks protect a streak but do not add to it.\n\n'
         'Unlocked ranks survive broken streaks. Only losing XP below a rank threshold can demote you; '
-        'earning the XP back restores that rank without repeating the streak.\\n\\n'
+        'earning the XP back restores that rank without repeating the streak.\n\n'
         '**Each rank reward unlocks permanently and can be claimed once**, '
         'even if you later drop to a lower rank.'), inline=False)
     notice = streak_blocked_rank_notice(gid, uid, get_xp(gid, uid))
@@ -2835,8 +2837,8 @@ def ranks_progress_embed(gid: int, uid: int) -> discord.Embed:
 
 def guild_rewards_progress_text(gid: int, uid: int) -> str:
     return (
-        '🎟️ **Guild Rewards**\\n\\n' + reward_eligibility_text(gid, uid)
-        + '\\n\\nSelect an **eligible, unclaimed** rank reward below to open '
+        '🎟️ **Guild Rewards**\n\n' + reward_eligibility_text(gid, uid)
+        + '\n\nSelect an **eligible, unclaimed** rank reward below to open '
           'a private ticket with Guild admins. Rank rewards are one-time Shopify '
           'discount codes, fulfilled manually by an admin.'
     )
@@ -2876,9 +2878,9 @@ class PrivateProgressView(discord.ui.View):
         if interaction.guild_id != GUILD_ID:
             return await interaction.response.send_message(
                 'This panel is only available in GYMGUILD.', ephemeral=True)
+        data = private_progress_content(self.kind, interaction)
         await interaction.response.edit_message(
-            content=None, embed=None,
-            **private_progress_content(self.kind, interaction), view=self,
+            content=data.get('content'), embed=data.get('embed'), view=self,
         )
 
 
@@ -2889,48 +2891,23 @@ class PlayerStatsView(discord.ui.View):
     @discord.ui.button(label='Profile', emoji='👤', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:stats:profile')
     async def profile_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        xp = get_xp(interaction.guild_id, interaction.user.id)
-        next_rank = next(((name, threshold) for name, threshold in RANKS if threshold > xp), None)
-        upcoming = f'Next: **{next_rank[0]}** in **{next_rank[1]-xp} XP**' if next_rank else 'Maximum rank reached ✦'
-        streak_notice = streak_blocked_rank_notice(interaction.guild_id, interaction.user.id, xp)
         await interaction.response.send_message(
-            f'✦ **{interaction.user.display_name}** — Rank: **{rank_for(xp, interaction.guild_id, interaction.user.id)}** · XP: **{xp}**\n'
-            f'🎯 Lifetime objectives completed: **{lifetime_objectives(interaction.guild_id, interaction.user.id)}**\nLongest streak: **{longest_streak(interaction.guild_id, interaction.user.id)} weeks**\n\n**Rewards**\n{reward_eligibility_text(interaction.guild_id, interaction.user.id)}\n{upcoming}'
-            + ('\n\n' + streak_notice if streak_notice else ''),
-            ephemeral=True)
+            **private_progress_content('profile', interaction),
+            view=PrivateProgressView(interaction.user.id, 'profile'), ephemeral=True)
 
     @discord.ui.button(label='Streak', emoji='🔥', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:stats:streak')
     async def streak_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        completed = completed_weeks(interaction.guild_id, interaction.user.id)
-        streak_count = streak_length(interaction.guild_id, interaction.user.id)
         await interaction.response.send_message(
-            f'🔥 **Your Weekly Streak** — Completed weeks: **{completed}** · Current closed-week streak: **{streak_count}**. Paused weeks preserve but do not increase your streak.',
-            ephemeral=True)
+            **private_progress_content('streak', interaction),
+            view=PrivateProgressView(interaction.user.id, 'streak'), ephemeral=True)
 
     @discord.ui.button(label='Ranks', emoji='🏆', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:stats:ranks')
     async def ranks_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(title='✦ GYMGUILD — RANKS', color=0x71A7A2)
-        for name, threshold in RANKS:
-            requirement = (f'{threshold:,} XP + **{STREAK_REQUIREMENTS[name]}-week active streak**'
-                           if name in STREAK_REQUIREMENTS else f'{threshold:,} XP')
-            reward = f' · **{REWARD_RANKS[name]}% reward**' if name in REWARD_RANKS else ''
-            embed.add_field(name=f'✦ {name}', value=requirement + reward, inline=False)
-        embed.add_field(name='🔒 Rank & reward rules', value=(
-            'Streak requirements must be met **while your streak is active**. Paused weeks protect a streak but do not add to it.\n\n'
-            'Unlocked ranks survive broken streaks. Only losing XP below a rank threshold can demote you; '
-            'earning the XP back restores that rank without repeating the streak.\n\n'
-            '**Each rank reward unlocks permanently and can be claimed once**, even if you later drop to a lower rank.'), inline=False)
-        streak_notice = streak_blocked_rank_notice(
-            interaction.guild_id, interaction.user.id,
-            get_xp(interaction.guild_id, interaction.user.id),
-        )
-        if streak_notice:
-            embed.add_field(name='🔒 Your rank progress', value=streak_notice, inline=False)
-        embed.set_footer(text='GYMGUILD ✦ Where culture meets strength')
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
+        await interaction.response.send_message(
+            **private_progress_content('ranks', interaction),
+            view=PrivateProgressView(interaction.user.id, 'ranks'), ephemeral=True)
 
     @discord.ui.button(label='Activate Pause', emoji='⏸️', style=discord.ButtonStyle.primary,
                        custom_id='guildkeeper:stats:activate_pause', row=1)
