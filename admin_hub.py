@@ -193,21 +193,26 @@ class XPForm(discord.ui.Modal):
         if amount < 1 or amount > 500 or not reason:
             return await interaction.response.send_message(
                 'Please provide 1–500 XP and a nonempty reason.', ephemeral=True)
+        current_xp = api.get_xp(interaction.guild_id, self.target_id)
+        signed = amount * self.sign
+        projected = max(0, current_xp + signed)
         await interaction.response.send_message(
             '⚠️ **Confirm XP change**\n'
             + 'Member ID: ' + str(self.target_id) + '\n'
-            + 'Change: **' + str(self.sign * amount) + ' XP**\n'
-            + 'Reason: ' + discord.utils.escape_mentions(reason) + '\n'
-            + 'Current balance: ' + str(api.get_xp(interaction.guild_id, self.target_id))
-            + ' XP\n\n**This may change the member’s rank.**',
-            view=ConfirmXP(self.owner_id, self.target_id, amount * self.sign, reason),
+            + 'Requested change: **' + str(signed) + ' XP**\n'
+            + 'Actual change: **' + str(projected - current_xp) + ' XP**\n'
+            + 'Balance: **' + str(current_xp) + ' → ' + str(projected) + ' XP**\n'
+            + 'Reason: ' + discord.utils.escape_mentions(reason)
+            + '\n\n**This may change the member’s rank.**',
+            view=ConfirmXP(self.owner_id, self.target_id, signed, reason, current_xp),
             ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
 class ConfirmXP(PrivateMenu):
-    def __init__(self, owner_id, target_id, amount, reason):
+    def __init__(self, owner_id, target_id, amount, reason, expected_xp=None):
         super().__init__(owner_id)
         self.target_id, self.amount, self.reason = target_id, amount, reason
+        self.expected_xp = expected_xp
         self.used = False
 
     @discord.ui.button(label='Confirm XP Change', emoji='✅', style=discord.ButtonStyle.danger)
@@ -223,6 +228,10 @@ class ConfirmXP(PrivateMenu):
         if member.bot:
             return await interaction.edit_original_response(content='Cannot adjust bot XP.', view=None)
         before = api.get_xp(interaction.guild_id, self.target_id)
+        if self.expected_xp is not None and before != self.expected_xp:
+            return await interaction.edit_original_response(
+                content='⚠️ Member XP changed since your preview. No change made. '
+                        'Reopen the action to confirm the new balance.', view=None)
         xp = api.add_xp(interaction.guild_id, self.target_id, self.amount,
                         'Moderator ' + str(interaction.user.id) + ': ' + self.reason)
         rank_updated = await api.update_rank(member, xp)
@@ -327,25 +336,71 @@ class ConfirmAnnouncement(PrivateMenu):
         await interaction.response.edit_message(content='Announcement cancelled.', view=None)
 
 
-def audit_summary():
+def audit_summary(category='all'):
+    """Recent changes, with actor, target, timestamp and moderator-provided reason."""
+    if category not in ('all', 'xp', 'quest', 'pause', 'reward'):
+        category = 'all'
     with api.connect() as db:
         rows = db.execute('SELECT actor_id,target_id,action,details,created_at '
-                          'FROM admin_hub_audit WHERE guild_id=? ORDER BY id DESC LIMIT 8',
+                          'FROM admin_hub_audit WHERE guild_id=? ORDER BY id DESC LIMIT 120',
                           (api.GUILD_ID,)).fetchall()
+    if category != 'all':
+        def matches(row):
+            action = row['action'].lower()
+            if category == 'xp':
+                return 'xp' in action
+            if category == 'quest':
+                return any(part in action for part in ('quest', 'starter', 'weekly', 'milestone'))
+            if category == 'pause':
+                return 'pause' in action
+            return any(part in action for part in ('reward', 'order'))
+        rows = [row for row in rows if matches(row)]
     if not rows:
-        return '📋 **Admin Hub Audit**\nNo Admin Hub changes yet. Legacy command audit history remains available.'
-    lines = ['📋 **Recent Admin Hub Changes**']
-    for row in rows:
-        detail = discord.utils.escape_mentions(row['details'])[:120]
-        lines.append(row['created_at'][:16] + ' · actor ' + str(row['actor_id'])
-                     + ' · ' + row['action'] + ' · ' + detail)
+        return '📋 **Admin Audit — ' + category.title() + '**\nNo matching recorded Admin Hub changes yet.'
+    lines = ['📋 **Admin Audit — ' + category.title() + '** (latest 10)']
+    for row in rows[:10]:
+        detail = discord.utils.escape_mentions(row['details'])[:160]
+        target = (' · target ' + str(row['target_id'])) if row['target_id'] else ''
+        lines.append('**' + row['created_at'][:16].replace('T', ' ') + ' UTC**'
+                     + ' · moderator ' + str(row['actor_id']) + target
+                     + '\n**' + row['action'].replace('_', ' ').title() + '** — ' + detail)
     return '\n'.join(lines)[:1900]
 
 
 class AuditMenu(PrivateMenu):
-    @discord.ui.button(label='Refresh Audit', emoji='🔄', style=discord.ButtonStyle.secondary)
+    def __init__(self, owner_id):
+        super().__init__(owner_id)
+        self.category = 'all'
+
+    async def show(self, interaction, category):
+        self.category = category
+        await interaction.response.edit_message(
+            content=audit_summary(category), view=self,
+            allowed_mentions=discord.AllowedMentions.none())
+
+    @discord.ui.button(label='All', style=discord.ButtonStyle.secondary)
+    async def all(self, interaction, button):
+        await self.show(interaction, 'all')
+
+    @discord.ui.button(label='XP', style=discord.ButtonStyle.secondary)
+    async def xp(self, interaction, button):
+        await self.show(interaction, 'xp')
+
+    @discord.ui.button(label='Quests', style=discord.ButtonStyle.secondary)
+    async def quests(self, interaction, button):
+        await self.show(interaction, 'quest')
+
+    @discord.ui.button(label='Pauses', style=discord.ButtonStyle.secondary)
+    async def pauses(self, interaction, button):
+        await self.show(interaction, 'pause')
+
+    @discord.ui.button(label='Rewards', style=discord.ButtonStyle.secondary)
+    async def rewards(self, interaction, button):
+        await self.show(interaction, 'reward')
+
+    @discord.ui.button(label='Refresh Audit', emoji='🔄', style=discord.ButtonStyle.primary, row=1)
     async def refresh(self, interaction, button):
-        await interaction.response.edit_message(content=audit_summary(), view=self)
+        await self.show(interaction, self.category)
 
 
 def health_summary(guild):
