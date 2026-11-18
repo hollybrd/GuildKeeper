@@ -86,6 +86,36 @@ class PurchaseMilestoneTests(unittest.TestCase):
         self.assertEqual(bot.get_xp(self.gid, self.uid + 1), 0)
         self.assertEqual(bot.review_purchase_order(self.gid, second, 1, False)[0], 'rejected')
 
+    def test_guild_completion_bonus_500_xp_exactly_once(self):
+        kinds = [kind for kind, *_ in bot.MILESTONE_QUESTS]
+        with bot.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            for kind in kinds[:-1]:
+                self.assertTrue(bot.grant_once(db, 'milestone_claims', self.gid, self.uid, kind, 1))
+        self.assertFalse(bot.milestone_progress(self.gid, self.uid)['bonus_earned'])
+        with bot.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.assertTrue(bot.grant_once(
+                db, 'milestone_claims', self.gid, self.uid, kinds[-1], 50))
+            self.assertFalse(bot.grant_once(
+                db, 'milestone_claims', self.gid, self.uid, kinds[-1], 50))
+        self.assertTrue(bot.milestone_progress(self.gid, self.uid)['bonus_earned'])
+        self.assertEqual(bot.milestone_progress(self.gid, self.uid)['completed'], 6)
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 555)
+        with bot.connect() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM milestone_claims WHERE guild_id=? AND user_id=? AND kind='guild_completion'",
+                (self.gid, self.uid),
+            ).fetchone()[0], 1)
+
+    def test_milestone_panel_and_reward_summary_do_not_give_unearned_xp(self):
+        self.assertIn('Completed: 0/6', bot.milestone_quests_embed(self.gid, self.uid).description)
+        self.assertIn('Locked', bot.order_rewards_text(self.gid, self.uid))
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
+        bot.submit_purchase_order(self.gid, self.uid, 'xyz')
+        self.assertIn('awaiting approval', bot.order_rewards_text(self.gid, self.uid))
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
+
     def test_invalid_reference_preserves_data(self):
         for invalid in ('', '   ', 'a' * 81, 'bad\nref'):
             self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, invalid), ('invalid', None))
