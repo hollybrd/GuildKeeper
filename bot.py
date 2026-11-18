@@ -11,6 +11,8 @@ import sys
 import admin_hub
 import testing_cheats
 import test_runner
+import announcements_scheduler
+import announcement_ui
 import admin_maintenance
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -4054,6 +4056,7 @@ async def scheduler():
         ('weekly_board', post_weekly_board),
         ('leaderboard', update_permanent_leaderboard),
         ('reward_ticket_expiry', expire_reward_tickets),
+        ('scheduled_announcements', announcements_scheduler.tick),
     ):
         try:
             result = operation()
@@ -4132,6 +4135,8 @@ async def on_app_command_error(interaction, error):
 admin_hub.install(sys.modules[__name__])
 testing_cheats.install(sys.modules[__name__])
 test_runner.install(sys.modules[__name__])
+announcements_scheduler.install(sys.modules[__name__])
+announcement_ui.api = sys.modules[__name__]
 
 
 if __name__=='__main__':

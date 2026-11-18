@@ -6,6 +6,8 @@ No legacy admin slash commands are replaced.
 import discord
 import panel_health
 import health_check
+import announcement_ui
+import announcements_scheduler
 from discord import app_commands
 
 api = None
@@ -65,8 +67,8 @@ class AdminHubView(discord.ui.View):
                        custom_id='guildkeeper:adminhub:announcements', row=0)
     async def announcements(self, interaction, button):
         await interaction.response.send_message(
-            '📣 **Announcements** — compose, preview and confirm a one-off announcement. '
-            'Mentions and role pings are disabled.', view=AnnouncementMenu(interaction.user.id),
+            '📣 **Announcements** — post now, schedule one-off/recurring messages, '
+            'and manage automatic notifications.', view=AnnouncementMenu(interaction.user.id),
             ephemeral=True)
 
     @discord.ui.button(label='Audit Log', emoji='📋', style=discord.ButtonStyle.secondary,
@@ -101,7 +103,7 @@ def hub_embed():
     for title, description in (
         ('👥 Players', 'Choose a member, check their progress, award or remove XP.'),
         ('🎟️ Rewards & Orders', 'Review outstanding requests in the existing moderator channel.'),
-        ('📣 Announcements', 'Compose, preview and publish without pings.'),
+        ('📣 Announcements', 'Post now, schedule recurring messages, and manage upcoming posts.'),
         ('📋 Audit Log', 'Inspect Admin Hub changes.'),
         ('⚙️ Bot Controls', 'Refresh panels, leaderboard and rank roles.'),
         ('🩺 Health Check', 'Check panels, runtime, database, permissions and configuration.'),
@@ -271,7 +273,25 @@ class RewardMenu(PrivateMenu):
 
 
 class AnnouncementMenu(PrivateMenu):
-    @discord.ui.button(label='Compose Announcement', emoji='📝', style=discord.ButtonStyle.primary)
+    @discord.ui.button(label='Schedule Message', emoji='📅', style=discord.ButtonStyle.primary)
+    async def schedule(self, interaction, button):
+        await interaction.response.send_message(
+            '📅 **Schedule an announcement** — choose its destination channel first.',
+            view=announcement_ui.ChooseChannel(self.owner_id), ephemeral=True)
+
+    @discord.ui.button(label='Upcoming Messages', emoji='📋', style=discord.ButtonStyle.secondary)
+    async def upcoming(self, interaction, button):
+        await interaction.response.send_message(
+            announcement_ui.listing(), view=announcement_ui.UpcomingMenu(self.owner_id),
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+    @discord.ui.button(label='Automatic Notices', emoji='⚙️', style=discord.ButtonStyle.secondary)
+    async def automatic(self, interaction, button):
+        await interaction.response.send_message(
+            announcement_ui.automatic_summary(), ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none())
+
+    @discord.ui.button(label='Compose Announcement', emoji='📝', style=discord.ButtonStyle.secondary)
     async def compose(self, interaction, button):
         channel = interaction.guild.get_channel(api.ANNOUNCEMENTS_CHANNEL_ID)
         if not isinstance(channel, discord.TextChannel):
