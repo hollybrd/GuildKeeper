@@ -34,6 +34,7 @@ import testing_cheats
 import test_runner
 import announcements_scheduler
 import announcement_ui
+import message_scheduler_panel
 import shopify_client
 import shopify_discord
 import shopify_rewards
@@ -534,6 +535,7 @@ class Guildkeeper(commands.Bot):
         self.add_view(WeeklyTurnInView())
         self.add_view(PlayerStatsView())
         self.add_view(admin_hub.AdminHubView())
+        self.add_view(message_scheduler_panel.SchedulerDashboard())
         self.add_view(testing_cheats.TestingCheatsView())
         self.add_view(shopify_discord.ShopHub())
         self.add_view(MilestoneBoardView())
@@ -4250,6 +4252,7 @@ testing_cheats.install(sys.modules[__name__])
 test_runner.install(sys.modules[__name__])
 announcements_scheduler.install(sys.modules[__name__])
 announcement_ui.api = sys.modules[__name__]
+message_scheduler_panel.install(sys.modules[__name__])
 shopify_discord.install(sys.modules[__name__])
 shopify_events.install(sys.modules[__name__])
 
