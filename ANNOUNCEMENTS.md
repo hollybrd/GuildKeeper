@@ -22,3 +22,6 @@ Permissions: only Manage Server staff can access scheduler controls. The bot nee
 **Potential future Shopify integration:** the Shopify app connection is separate from this Discord scheduler. Once store integrations are approved, verified shop events (new products, sale starts/ends, release drops) could use this same scheduler/publishing layer, with opt-in announcements. A Discord mini shop could show product cards with links to Shopify checkout; do not accept customer payment data or create a payment processor inside Discord.
 
 **Manual deployment required.** Merging code to GitHub does not deploy GuildKeeper to Oracle.
+## Event automation GuildBlast pings
+
+In **Message Scheduler → Automations → select an event → Edit Content**, the **Ping @GuildBlast? yes or no** field lets a moderator turn notification pings on or off separately for each supported event type. This is off by default. The GuildBlast role must exist and be mentionable by GuildKeeper in the destination channel. The bot posts the role mention outside the embed, with only this role allowed in Discord's mention settings. Custom timed messages retain their existing separate GuildBlast ping option. Existing posted messages are not changed.

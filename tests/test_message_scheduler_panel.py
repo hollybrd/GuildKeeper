@@ -93,12 +93,57 @@ class SchedulerPanelTests(unittest.IsolatedAsyncioTestCase):
                                          "Default title","Original content")
             post.assert_awaited_once_with(
                 "weekly-refresh-2026-11-16","New quests",
-                "Check them out\n\nOriginal content",123)
+                "Check them out\n\nOriginal content",123,
+                ping_guildblast=False)
         core.set_automation_enabled("weekly_quests",False,9)
         with patch.object(core,"automatic_event",new=AsyncMock()) as post:
             result=await core.configured_notice("weekly_quests","later","Title","Body")
             self.assertFalse(result)
             post.assert_not_awaited()
+
+    def test_automation_ping_setting_defaults_off_and_persists(self):
+        self.assertFalse(core.automation_policy("weekly_quests")["ping_guildblast"])
+        self.assertFalse(core.automation_policy("shop_new")["ping_guildblast"])
+        core.save_automation("weekly_quests",555,"Fresh quests","",True,9,
+                             ping_guildblast=True)
+        self.assertTrue(core.automation_policy("weekly_quests")["ping_guildblast"])
+        self.assertEqual(core.automation("weekly_quests")["ping_guildblast"],1)
+        self.assertIn("GuildBlast ping: **On**",panel.automation_detail("weekly_quests"))
+        self.assertIn("🔔 @GuildBlast",panel.automation_text())
+        self.assertEqual(
+            panel.AutomationForm(9,"weekly_quests",555).ping.default,"yes")
+        core.save_automation("weekly_quests",555,"Fresh quests","",True,9,
+                             ping_guildblast=False)
+        self.assertFalse(core.automation_policy("weekly_quests")["ping_guildblast"])
+        core.delete_automation("weekly_quests")
+        self.assertFalse(core.automation_policy("weekly_quests")["ping_guildblast"])
+
+    async def test_automation_ping_flag_reaches_delivery(self):
+        core.save_automation("shop_sale",555,"Sale","",True,9,ping_guildblast=True)
+        with patch.object(core,"automatic_event",new=AsyncMock(return_value=True)) as send:
+            await core.configured_notice("shop_sale","sale-42","Default","Details")
+        send.assert_awaited_once_with(
+            "sale-42","Sale","Details",555,ping_guildblast=True)
+
+    def test_existing_automation_database_migrates_without_losing_settings(self):
+        # Simulate a database written by the previous GuildKeeper release.
+        with bot.connect() as db:
+            db.execute("DROP TABLE scheduler_automations")
+            db.execute("""CREATE TABLE scheduler_automations (
+              guild_id INTEGER NOT NULL, kind TEXT NOT NULL,
+              channel_id INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+              title TEXT NOT NULL DEFAULT '', intro TEXT NOT NULL DEFAULT '',
+              updated_by INTEGER NOT NULL, updated_at TEXT NOT NULL,
+              PRIMARY KEY (guild_id,kind))""")
+            db.execute("""INSERT INTO scheduler_automations
+              VALUES (?,?,?,?,?,?,?,?)""",
+              (bot.GUILD_ID,"monthly_leaderboard",555,1,"My Recap","Keep going",
+               9,bot.utc_now().isoformat()))
+        core.initialize()
+        saved=core.automation("monthly_leaderboard")
+        self.assertEqual(saved["title"],"My Recap")
+        self.assertEqual(saved["intro"],"Keep going")
+        self.assertEqual(saved["ping_guildblast"],0)
 
     def test_message_listing_and_timeline_support_multiple_pages(self):
         import announcement_ui

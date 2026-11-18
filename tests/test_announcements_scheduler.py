@@ -136,6 +136,49 @@ class AnnouncementSchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(schedule.get(job)["status"],"error")
         self.assertEqual(schedule.failed_count(),1)
 
+    async def test_automated_notice_pings_only_guildblast_when_enabled(self):
+        role=SimpleNamespace(id=12345,mention="<@&12345>",mentionable=True)
+        channel=SimpleNamespace(send=AsyncMock(return_value=SimpleNamespace(id=1001)))
+        guild=SimpleNamespace(get_role=lambda ident: role if ident==12345 else None)
+        original_role=bot.GUILD_BLAST_ROLE_ID
+        bot.GUILD_BLAST_ROLE_ID=12345
+        try:
+            with patch.object(schedule,"check_channel",return_value=channel) as checked, \
+                 patch.object(bot.bot,"get_guild",return_value=guild):
+                self.assertTrue(await schedule.automatic_event(
+                    "notice-with-ping","Hello","World",123,ping_guildblast=True))
+                checked.assert_called_once_with(guild,123,ping=True)
+            kwargs=channel.send.await_args.kwargs
+            self.assertEqual(kwargs["content"],"<@&12345>")
+            allowed=kwargs["allowed_mentions"]
+            self.assertFalse(allowed.everyone)
+            self.assertFalse(allowed.users)
+            self.assertEqual(allowed.roles,[role])
+        finally:
+            bot.GUILD_BLAST_ROLE_ID=original_role
+
+    async def test_automated_notice_without_ping_has_no_mentions(self):
+        channel=SimpleNamespace(send=AsyncMock(return_value=SimpleNamespace(id=1002)))
+        with patch.object(schedule,"check_channel",return_value=channel), \
+             patch.object(bot.bot,"get_guild",return_value=SimpleNamespace()):
+            self.assertTrue(await schedule.automatic_event(
+                "notice-without-ping","Hello","World",123))
+        kwargs=channel.send.await_args.kwargs
+        self.assertIsNone(kwargs["content"])
+        self.assertFalse(kwargs["allowed_mentions"].roles)
+        self.assertFalse(kwargs["allowed_mentions"].users)
+        self.assertFalse(kwargs["allowed_mentions"].everyone)
+
+    async def test_ping_permission_error_does_not_send_notice(self):
+        channel=SimpleNamespace(send=AsyncMock())
+        with patch.object(schedule,"check_channel",
+                          side_effect=ValueError("Guild Blast role cannot be mentioned")), \
+             patch.object(bot.bot,"get_guild",return_value=SimpleNamespace()):
+            self.assertFalse(await schedule.automatic_event(
+                "invalid-ping","Hello","World",123,ping_guildblast=True))
+        channel.send.assert_not_awaited()
+        self.assertEqual(schedule.failed_count(),1)
+
     async def test_weekly_auto_notice_only_after_board(self):
         with patch.object(bot.bot,"get_guild",return_value=self.guild), \
              patch.object(schedule,"automatic_event",new=AsyncMock(return_value=True)) as post:
