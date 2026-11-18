@@ -8,6 +8,7 @@ ACTIONS = {
     'weekly_reset': ('Weekly Quest Reset', 'admin_weekly_reset'),
     'pause_reset': ('Pause History Reset', 'admin_pause_reset'),
     'streak_add': ('Add Streak Weeks', 'admin_streak_add'),
+    'streak_remove': ('Remove Credited Streak Weeks', None),
     'rank_reset': ('Reset My Rank Test', 'admin_rank_test_reset'),
 }
 REWARD_RANKS = ('Master', 'Legend', 'Paragon')
@@ -64,10 +65,12 @@ class TestingCheatsView(discord.ui.View):
     async def weekly(self, interaction, button):
         await choose_member(interaction, 'weekly_reset')
 
-    @discord.ui.button(label='Add Streak', emoji='🔥', style=discord.ButtonStyle.secondary,
+    @discord.ui.button(label='Add / Remove Streak', emoji='🔥', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:testing:streak', row=1)
     async def streak(self, interaction, button):
-        await choose_member(interaction, 'streak_add')
+        await interaction.response.send_message(
+            '🔥 **Streak Testing** — Add consecutive weeks or remove previously admin-credited weeks.',
+            view=StreakChoiceView(interaction.user.id), ephemeral=True)
 
     @discord.ui.button(label='Pause Reset', emoji='⏸️', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:testing:pause', row=1)
@@ -90,17 +93,52 @@ class TestingCheatsView(discord.ui.View):
     async def reward(self, interaction, button):
         await choose_member(interaction, 'reward_reset')
 
+    @discord.ui.button(label='Milestone Reset', emoji='🏅', style=discord.ButtonStyle.secondary,
+                       custom_id='guildkeeper:testing:milestone', row=2)
+    async def milestone(self, interaction, button):
+        await interaction.response.send_message(
+            '🏅 **Milestone Test Reset** — choose Order XP, Boost XP, or both. '
+            'This affects YOUR own account only.',
+            view=MilestoneTargetView(interaction.user.id), ephemeral=True)
+
     @discord.ui.button(label='All Test Commands', emoji='📋', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:testing:commands', row=2)
     async def commands(self, interaction, button):
-        await interaction.response.send_message(
-            '**Other administrator / testing commands**\n'
-            '/admin_rank_test_reset · /admin_streak_add · /admin_xp_award · /admin_xp_remove\n'
-            '/admin_starter_reset · /admin_starter_award · /admin_weekly_reset\n'
-            '/admin_pause_reset · /admin_reward_reset · /admin_reward_fulfill\n'
-            '/admin_weekly_settle · /admin_sync_ranks · /admin_quest_create\n'
-            'Use the buttons above for common tests; existing slash commands remain available '
-            'for less-frequent operations.', ephemeral=True)
+        await interaction.response.send_message(embed=test_command_guide(), ephemeral=True)
+
+
+def test_command_guide():
+    guide = discord.Embed(
+        title='📋 Testing & Admin Commands',
+        description='Backup slash commands organised by purpose. Select a command in Discord’s '
+                    '/ menu to fill out its options. **These operate on real Guild data.**',
+        colour=0x71A7A2)
+    sections = (
+        ('⭐ XP & Rank', [
+            ('admin_xp_award', 'Award member XP'),
+            ('admin_xp_remove', 'Deduct member XP'),
+            ('admin_rank_test_reset', 'Reset your rank to Novice'),
+            ('admin_sync_ranks', 'Synchronise rank roles')]),
+        ('🔥 Streaks & Weekly Quests', [
+            ('admin_streak_add', 'Credit streak weeks'),
+            ('admin_weekly_reset', 'Reset a member’s weekly quest'),
+            ('admin_weekly_settle', 'Process weekly settlement')]),
+        ('🛡️ Starter & Milestones', [
+            ('admin_starter_reset', 'Reset Starter Quest'),
+            ('admin_starter_award', 'Award Starter objective'),
+            ('admin_milestone_test_reset', 'Reset your Order / Boost XP'),
+            ('admin_pause_reset', 'Clear pause history')]),
+        ('🎟️ Rewards & Other', [
+            ('admin_reward_reset', 'Reset rank reward request'),
+            ('admin_reward_fulfill', 'Fulfil rank reward'),
+            ('admin_quest_create', 'Create a legacy quest')]),
+    )
+    for heading, items in sections:
+        guide.add_field(name=heading, value='\\n'.join(
+            f'**/{cmd}** — {description}' for cmd, description in items).replace('\\n', '\n'),
+            inline=False)
+    guide.set_footer(text='Common actions are available through Testing Cheats buttons')
+    return guide
 
 
 def embed():
@@ -110,11 +148,37 @@ def embed():
                     'in this Guild — not a simulation. Choose a shortcut, select a member, '
                     'and confirm before applying a reset. Use a test account where possible.',
         colour=discord.Colour.orange())
-    e.add_field(name='XP & Progress', value='Award/remove XP · Starter reset · Weekly reset · Add streak weeks', inline=False)
-    e.add_field(name='Advanced', value='Pause history reset · Self-only rank test reset · Rank reward reset', inline=False)
+    e.add_field(name='XP & Progress', value='Award/remove XP · Starter reset · Weekly reset · Add/remove credited streak weeks', inline=False)
+    e.add_field(name='Advanced', value='Pause history reset · Self-only rank/milestone resets · Rank reward reset', inline=False)
     e.add_field(name='Safety', value='All actions require Manage Server. Destructive actions need confirmation. '
                 'Existing admin commands are preserved.', inline=False)
     return e
+
+
+class StreakChoiceView(Private):
+    @discord.ui.button(label='Add Streak Weeks', emoji='➕', style=discord.ButtonStyle.success)
+    async def add(self, interaction, button):
+        await choose_member(interaction, 'streak_add')
+
+    @discord.ui.button(label='Remove Streak Weeks', emoji='➖', style=discord.ButtonStyle.danger)
+    async def remove(self, interaction, button):
+        await choose_member(interaction, 'streak_remove')
+
+
+class MilestoneTargetView(Private):
+    @discord.ui.select(placeholder='Select milestone reset', options=[
+        discord.SelectOption(label='Order XP', value='order'),
+        discord.SelectOption(label='Server Boost XP', value='boost'),
+        discord.SelectOption(label='Both', value='both'),
+    ])
+    async def choose(self, interaction, select):
+        target = select.values[0]
+        await interaction.response.send_message(
+            '⚠️ **Reset your own ' + target + ' milestone(s)?**\n'
+            'This reverses recorded XP for selected claims and potentially the 500 XP completion bonus. '
+            'Order history is archived, not deleted. An active boost needs a new boost event to re-award XP.',
+            view=ConfirmCheat(self.owner_id, self.owner_id, 'milestone_reset', rank=target),
+            ephemeral=True)
 
 
 async def choose_member(interaction, action):
@@ -139,8 +203,8 @@ class CheatUserSelect(discord.ui.UserSelect):
             return await interaction.response.send_message('Member unavailable.', ephemeral=True)
         if member.bot:
             return await interaction.response.send_message('Bot accounts are not valid testing targets.', ephemeral=True)
-        if self.action == 'streak_add':
-            return await interaction.response.send_modal(StreakForm(interaction.user.id, member.id))
+        if self.action in ('streak_add', 'streak_remove'):
+            return await interaction.response.send_modal(StreakForm(interaction.user.id, member.id, self.action))
         if self.action == 'reward_reset':
             return await interaction.response.send_message(
                 'Choose which rank reward request to reset for this player. '
@@ -166,9 +230,10 @@ class CheatMemberPickerView(Private):
 
 
 class StreakForm(discord.ui.Modal):
-    def __init__(self, owner_id, target_id):
-        super().__init__(title='Credit Test Streak Weeks', timeout=300)
-        self.owner_id, self.target_id = owner_id, target_id
+    def __init__(self, owner_id, target_id, action='streak_add'):
+        super().__init__(title='Add Streak Weeks' if action == 'streak_add'
+                         else 'Remove Credited Streak Weeks', timeout=300)
+        self.owner_id, self.target_id, self.action = owner_id, target_id, action
         self.weeks = discord.ui.TextInput(label='Weeks (1 to 52)', placeholder='4', max_length=2)
         self.add_item(self.weeks)
 
@@ -181,10 +246,17 @@ class StreakForm(discord.ui.Modal):
             weeks = 0
         if not 1 <= weeks <= 52:
             return await interaction.response.send_message('Choose between 1 and 52 weeks.', ephemeral=True)
+        if self.action == 'streak_add':
+            warning = 'This may unlock ranks and award one-time milestone XP.'
+        else:
+            warning = ('Only the most recent admin-credited weeks are removed. Actual Weekly Quest '
+                       'completions remain. Already-awarded milestone XP and permanent rank unlocks '
+                       'will NOT be reversed automatically.')
         await interaction.response.send_message(
-            '⚠️ Credit **' + str(weeks) + ' consecutive weeks** to <@'
-            + str(self.target_id) + '>?\nThis can unlock ranks and award one-time milestone XP.',
-            view=ConfirmCheat(self.owner_id, self.target_id, 'streak_add', weeks=weeks),
+            '⚠️ **' + ('Add' if self.action == 'streak_add' else 'Remove up to')
+            + ' ' + str(weeks) + ' streak week(s)** for <@' + str(self.target_id)
+            + '> ?\n' + warning + '\n**Confirm this change to live progress.**',
+            view=ConfirmCheat(self.owner_id, self.target_id, self.action, weeks=weeks),
             ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
@@ -210,7 +282,14 @@ class RewardRankPicker(Private):
 
 async def run_existing_command(interaction, action, target_id, weeks=None, rank=None):
     """Run unchanged legacy command implementation; permissions checked first."""
-    if action == 'rank_reset':
+    if action == 'milestone_reset':
+        if target_id != interaction.user.id or rank not in ('order', 'boost', 'both'):
+            raise ValueError('Milestone reset is self-only')
+        args = (interaction, app_commands.Choice(
+            name={'order':'Order XP','boost':'Server Boost XP','both':'Both'}[rank],
+            value=rank), True)
+        command_name = 'admin_milestone_test_reset'
+    elif action == 'rank_reset':
         if target_id != interaction.user.id:
             raise ValueError('Rank test reset is self-only')
         args = (interaction, True)
@@ -224,9 +303,27 @@ async def run_existing_command(interaction, action, target_id, weeks=None, rank=
                 raise ValueError('Invalid reward rank')
             args = (interaction, member, app_commands.Choice(name=rank, value=rank))
             command_name = 'admin_reward_reset'
-        elif action == 'streak_add':
+        elif action in ('streak_add', 'streak_remove'):
             if not weeks or not 1 <= weeks <= 52:
                 raise ValueError('Streak weeks must be 1–52')
+            if action == 'streak_remove':
+                await interaction.response.defer(ephemeral=True)
+                gid, uid = interaction.guild_id, member.id
+                with api.connect() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    rows = db.execute(
+                        'SELECT week_key FROM admin_streak_weeks WHERE guild_id=? AND user_id=? '
+                        'ORDER BY week_key DESC LIMIT ?', (gid, uid, weeks)).fetchall()
+                    for row in rows:
+                        db.execute('DELETE FROM admin_streak_weeks WHERE guild_id=? '
+                                   'AND user_id=? AND week_key=?', (gid, uid, row['week_key']))
+                await api.update_rank(member, api.get_xp(gid, uid))
+                await interaction.followup.send(
+                    '🔥 Removed **' + str(len(rows)) + '** admin-credited weeks from '
+                    + member.mention + '. Active streak: **' + str(api.active_streak(gid, uid))
+                    + '**. Real quest completions, previously earned milestone XP '
+                    'and permanent rank unlocks were kept.', ephemeral=True)
+                return
             args = (interaction, member, weeks)
             command_name = 'admin_streak_add'
         else:
