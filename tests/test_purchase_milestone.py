@@ -283,6 +283,66 @@ class PurchaseMilestoneTests(unittest.TestCase):
         self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, 'test-1002')[0], 'approved')
         self.assertEqual(bot.get_xp(self.gid, self.uid), 250)
 
+    def test_streak_resets_on_missed_week_and_pause_preserves_count(self):
+        from datetime import timedelta
+        from unittest.mock import patch
+        # Timeline from the user: 1 2 3 complete, 4 missed,
+        # 5 complete, 6 paused, 7 complete = 2-week streak.
+        now_week = bot.week_start()
+        first = now_week - timedelta(weeks=6)
+        def key(n):
+            return (first + timedelta(weeks=n - 1)).date().isoformat()
+        with bot.connect() as db:
+            for n in (1, 2, 3, 5, 7):
+                db.execute(
+                    'INSERT INTO weekly_completions VALUES (?,?,?,?)',
+                    (self.gid, self.uid, key(n), bot.utc_now().isoformat()))
+            db.execute('INSERT INTO pauses VALUES (?,?,?,?)',
+                       (self.gid, self.uid, key(6), bot.utc_now().isoformat()))
+        with patch.object(bot, 'week_start', return_value=now_week):
+            self.assertEqual(bot.active_streak(self.gid, self.uid), 2)
+            self.assertEqual(bot.longest_streak(self.gid, self.uid), 3)
+            # Paused week protects, but does not increase count.
+            self.assertEqual(bot.award_earned_streak_milestones(self.gid, self.uid), [])
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
+
+    def test_inactivity_penalty_requires_zero_weekly_objectives(self):
+        wk = bot.week_key()
+        with bot.connect() as db:
+            self.assertTrue(bot.week_needs_inactivity_penalty(
+                db, self.gid, self.uid, wk))
+            db.execute(
+                'INSERT INTO weekly_actions VALUES (?,?,?,?,?,?,?,?)',
+                (self.gid, self.uid, wk, 'gym', wk, 901, 'test-gym',
+                 bot.utc_now().isoformat()))
+            self.assertFalse(bot.week_needs_inactivity_penalty(
+                db, self.gid, self.uid, wk))
+            # Pressing the Turn In button is not needed to avoid the fine.
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM weekly_completions WHERE guild_id=? AND user_id=?',
+                (self.gid, self.uid)).fetchone()[0], 0)
+        next_week = (bot.week_start() + timedelta(weeks=1)).date().isoformat()
+        with bot.connect() as db:
+            db.execute('INSERT INTO pauses VALUES (?,?,?,?)',
+                       (self.gid, self.uid, next_week, bot.utc_now().isoformat()))
+            self.assertFalse(bot.week_needs_inactivity_penalty(
+                db, self.gid, self.uid, next_week))
+            db.execute('INSERT INTO resumed_pauses VALUES (?,?,?,?)',
+                       (self.gid, self.uid, next_week, bot.utc_now().isoformat()))
+            self.assertTrue(bot.week_needs_inactivity_penalty(
+                db, self.gid, self.uid, next_week))
+
+    def test_full_quest_completion_counts_without_pressing_turn_in(self):
+        # A finished week is stored independently of the Discord Turn In button.
+        with bot.connect() as db:
+            wk = bot.week_key()
+            db.execute(
+                'INSERT INTO weekly_completions VALUES (?,?,?,?)',
+                (self.gid, self.uid, wk, bot.utc_now().isoformat()))
+        self.assertEqual(bot.active_streak(self.gid, self.uid), 1)
+        self.assertEqual(bot.award_earned_streak_milestones(self.gid, self.uid), [])
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
+
     def test_admin_credited_streak_weeks_unlock_milestone_rewards(self):
         from datetime import timedelta
         start = bot.week_start()
