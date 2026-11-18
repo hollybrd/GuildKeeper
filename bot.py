@@ -1707,11 +1707,13 @@ async def milestone_purchase(interaction: discord.Interaction, order_reference: 
         mod_channel = interaction.guild.get_channel(MOD_REVIEW_CHANNEL_ID) if MOD_REVIEW_CHANNEL_ID else None
         if isinstance(mod_channel, discord.TextChannel):
             try:
+                safe_reference = discord.utils.escape_mentions(
+                    discord.utils.escape_markdown(order_reference.strip()))
                 await mod_channel.send(
                     '🛍️ **First-purchase milestone pending review**\n'
                     f'Member: {interaction.user.mention}\n'
-                    'Use **/admin_milestone_review** to approve or reject their request. '
-                    'Order reference is stored in the private GuildKeeper database.',
+                    f'Order reference: **{safe_reference}**\n'
+                    'Verify in Shopify, then use **/admin_milestone_review** to approve or reject.',
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
             except (discord.Forbidden, discord.HTTPException):
@@ -1739,6 +1741,40 @@ def review_first_purchase_milestone(gid: int, uid: int, approve: bool) -> str:
             awarded = grant_once(db, 'milestone_claims', gid, uid, 'purchase1', 50)
             return 'awarded' if awarded else 'already_awarded'
     return 'rejected'
+
+
+@bot.tree.command(
+    name='admin_milestone_pending',
+    description='Moderator: privately list first-purchase milestone requests awaiting review',
+)
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def admin_milestone_pending(interaction: discord.Interaction):
+    if interaction.guild_id != GUILD_ID:
+        return await interaction.response.send_message(
+            'This command belongs to GYMGUILD.', ephemeral=True)
+    with connect() as db:
+        rows = db.execute(
+            'SELECT user_id,evidence,created_at FROM pending_milestones '
+            'WHERE guild_id=? AND kind=? AND status=? '
+            'ORDER BY created_at ASC LIMIT 15',
+            (interaction.guild_id, 'purchase1', 'pending'),
+        ).fetchall()
+    if not rows:
+        return await interaction.response.send_message(
+            '✅ No first-purchase milestones awaiting review.', ephemeral=True)
+    lines = []
+    for row in rows:
+        safe_reference = discord.utils.escape_mentions(
+            discord.utils.escape_markdown(row['evidence'] or '(missing)'))
+        lines.append(f'<@{row["user_id"]}> — order reference: **{safe_reference}**')
+    await interaction.response.send_message(
+        '🛍️ **First-purchase milestones awaiting review**\n'
+        + '\n'.join(lines)
+        + '\n\nVerify the reference in Shopify, then use **/admin_milestone_review**.',
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
 
 
 @bot.tree.command(name='admin_milestone_review',description='Moderator: approve or reject a first-purchase milestone')
