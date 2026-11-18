@@ -438,6 +438,13 @@ def health_summary(guild):
 
 
 class ControlMenu(PrivateMenu):
+    @discord.ui.button(label='Shopify Store', emoji='🛍️', style=discord.ButtonStyle.secondary, row=1)
+    async def shopify(self, interaction, button):
+        await interaction.response.send_message(
+            shopify_status(),view=ShopifyMenu(self.owner_id),ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none())
+
+
     @discord.ui.button(label='Refresh Player Hub', emoji='🔄', style=discord.ButtonStyle.primary)
     async def player_hub(self, interaction, button):
         await interaction.response.defer(ephemeral=True)
@@ -467,6 +474,82 @@ class ControlMenu(PrivateMenu):
         await interaction.followup.send(
             panel_health.render(checks), view=PanelHealthMenu(self.owner_id), ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none())
+
+def shopify_status():
+    with api.connect() as db:
+        row=db.execute("SELECT value FROM v12_config WHERE key=?",
+                       (f"shopify-shop-post-{api.GUILD_ID}",)).fetchone()
+        codes=db.execute("SELECT COUNT(*) AS n FROM shopify_reward_codes "
+                         "WHERE guild_id=? AND status='delivered'",
+                         (api.GUILD_ID,)).fetchone()["n"]
+    configured=api.shopify_client.admin_configured()
+    return ('🛍️ **GYMGUILD Shopify Integration**\n'
+            '**Store:** https://gymguild.co.uk\n'
+            '**Discord Shop:** '+("Posted in <#"+row["value"].split(":")[0]+">" if row else
+                                    "Not posted — choose a channel below")+'\n'
+            '**Products:** Public Shopify storefront feed\n'
+            '**Order checks & codes:** '+("Admin API configured" if configured
+                                          else "Admin API credentials needed")+'\n'
+            '**Automatic new drops/sales:** '+("Enabled" if api.shopify_events.enabled()
+                                               else "Disabled by default")+'\n'
+            f'**Codes delivered:** {codes}\n\n'
+            'Shopify checkout stays on the official website. '
+            'No tokens are displayed in Discord.')
+
+
+class ShopChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self):
+        super().__init__(placeholder='Choose public shop channel',
+                         channel_types=[discord.ChannelType.text])
+
+    async def callback(self,interaction):
+        if not allowed(interaction) or interaction.user.id!=self.view.owner_id:
+            return await interaction.response.send_message('Manage Server required.',ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        channel=interaction.guild.get_channel(self.values[0].id)
+        ok,message=await api.shopify_discord.post_shop_panel(channel)
+        if ok:
+            audit(interaction.user.id,'shopify_shop_panel_post',message)
+        await interaction.followup.send(('✅ ' if ok else '⚠️ ')+message,ephemeral=True)
+
+
+class ShopChannelMenu(PrivateMenu):
+    def __init__(self,owner_id):
+        super().__init__(owner_id)
+        self.add_item(ShopChannelSelect())
+
+
+class ShopifyMenu(PrivateMenu):
+    @discord.ui.button(label='Post / Move Shop',emoji='🛍️',style=discord.ButtonStyle.primary)
+    async def post(self,interaction,button):
+        await interaction.response.send_message(
+            'Choose a server channel for your permanent GYMGUILD shop panel.',
+            view=ShopChannelMenu(self.owner_id),ephemeral=True)
+
+    @discord.ui.button(label='Refresh Shop',emoji='🔄',style=discord.ButtonStyle.secondary)
+    async def refresh(self,interaction,button):
+        with api.connect() as db:
+            row=db.execute('SELECT value FROM v12_config WHERE key=?',
+                           (f'shopify-shop-post-{api.GUILD_ID}',)).fetchone()
+        if not row:
+            return await interaction.response.send_message(
+                'Set up the Shop panel first.',ephemeral=True)
+        try:
+            channel_id=int(row['value'].split(':')[0])
+        except (ValueError,IndexError):
+            return await interaction.response.send_message(
+                'Shop panel configuration is invalid; select a new channel.',ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        ok,message=await api.shopify_discord.post_shop_panel(
+            interaction.guild.get_channel(channel_id))
+        await interaction.followup.send(('✅ ' if ok else '⚠️ ')+message,ephemeral=True)
+
+    @discord.ui.button(label='Check Setup',emoji='🔍',style=discord.ButtonStyle.secondary)
+    async def check(self,interaction,button):
+        await interaction.response.edit_message(
+            content=shopify_status(),view=self,
+            allowed_mentions=discord.AllowedMentions.none())
+
 
 class HealthCheckMenu(PrivateMenu):
     @discord.ui.button(label='Check Again', emoji='🔄', style=discord.ButtonStyle.primary)

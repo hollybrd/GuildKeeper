@@ -165,6 +165,16 @@ async def run(api, guild):
     core = check_runtime(api, guild) + [check_database(api)]
     core += check_channels(api, guild)
     core += check_roles(api, guild)
+    configured = api.shopify_client.admin_configured()
+    core.append(status(
+        'Shopify store integration', 'current' if configured else 'warning',
+        'Admin API credentials configured for private order verification and reward codes'
+        if configured else 'Public shop browsing available; Admin API not configured '
+        '(order verification and reward codes disabled)'))
+    core.append(status(
+        'Shopify store notices', 'current',
+        'Store announcements opted in (poll every 30 minutes)'
+        if api.shopify_events.enabled() else 'Off until SHOPIFY_AUTO_ANNOUNCE=1'))
     try:
         problems = api.announcements_scheduler.failed_count()
         core.append(status('Announcement deliveries',
@@ -230,7 +240,8 @@ def render(report):
                     value='\n'.join(panel_lines)[:1024] or 'No panels could be inspected',
                     inline=False)
 
-    runtime_names = {'Discord connection', 'Gateway latency', 'Scheduled jobs', 'Database', 'Startup panel maintenance', 'Announcement deliveries'}
+    runtime_names = {'Discord connection', 'Gateway latency', 'Scheduled jobs', 'Database', 'Startup panel maintenance', 'Announcement deliveries',
+                     'Shopify store integration', 'Shopify store notices'}
     groups = [('Runtime & database', [c for c in report['core'] if c['name'] in runtime_names]),
               ('Scheduled task details', [c for c in report['core'] if c['name'].startswith('Job: ')]),
               ('Channel permissions & roles', [c for c in report['core']

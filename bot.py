@@ -13,6 +13,10 @@ import testing_cheats
 import test_runner
 import announcements_scheduler
 import announcement_ui
+import shopify_client
+import shopify_discord
+import shopify_rewards
+import shopify_events
 import admin_maintenance
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -492,6 +496,7 @@ class Guildkeeper(commands.Bot):
         self.add_view(PlayerStatsView())
         self.add_view(admin_hub.AdminHubView())
         self.add_view(testing_cheats.TestingCheatsView())
+        self.add_view(shopify_discord.ShopHub())
         self.add_view(MilestoneBoardView())
         self.add_view(RewardTicketAdminView())
         # Register outstanding review buttons after restarts.
@@ -2388,6 +2393,12 @@ async def post_purchase_review(guild: discord.Guild, user_id: int, order_id: int
             'SELECT order_reference FROM purchase_orders WHERE guild_id=? AND id=?',
             (guild.id, order_id),
         ).fetchone()
+        # Verify flags are read-only; an actual moderator must still approve XP.
+        shopify_checked = db.execute(
+            'SELECT verified_at FROM shopify_order_verifications '
+            'WHERE guild_id=? AND purchase_id=?',
+            (guild.id, order_id),
+        ).fetchone() if shopify_client.admin_configured() else None
     if row is None:
         return False
     reference = discord.utils.escape_mentions(
@@ -2395,8 +2406,11 @@ async def post_purchase_review(guild: discord.Guild, user_id: int, order_id: int
     embed = discord.Embed(
         title='🛍️ ORDER XP — REVIEW REQUIRED',
         description=(f'Member: <@{user_id}>\nOrder reference: **{reference}**\n'
-                     'Check this order in Shopify before approving.\n'
-                     f'**First approved order: +{MILESTONE_XP["purchase1"]} XP. Subsequent orders: +0 XP.**'),
+                     + ('✅ Shopify API checked: paid, uncancelled; supplied email matches. '
+                        'Still confirm ownership before approving.\n'
+                        if shopify_checked else '⚠️ Not Shopify-verified by GuildKeeper. '
+                        'Check the order in Shopify before approval.\n')
+                     + f'**First approved order: +{MILESTONE_XP["purchase1"]} XP. Subsequent orders: +0 XP.**'),
         colour=discord.Colour.from_rgb(104, 163, 153),
     )
     try:
@@ -3047,6 +3061,12 @@ class RewardTicketAdminView(discord.ui.View):
             await interaction.response.send_message('This is not a registered reward ticket.', ephemeral=True)
             return False
         return True
+
+    @discord.ui.button(label='Generate Shopify Code', emoji='🏷️',
+                       style=discord.ButtonStyle.primary,
+                       custom_id='guildkeeper:reward:shopify_code')
+    async def shopify_code(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await shopify_rewards.request_code(sys.modules[__name__], interaction)
 
     @discord.ui.button(label='Fulfil Reward', emoji='🎁', style=discord.ButtonStyle.success,
                        custom_id='guildkeeper:reward:fulfil')
@@ -4057,6 +4077,7 @@ async def scheduler():
         ('leaderboard', update_permanent_leaderboard),
         ('reward_ticket_expiry', expire_reward_tickets),
         ('scheduled_announcements', announcements_scheduler.tick),
+        ('shopify_store_events', shopify_events.tick),
     ):
         try:
             result = operation()
@@ -4137,6 +4158,8 @@ testing_cheats.install(sys.modules[__name__])
 test_runner.install(sys.modules[__name__])
 announcements_scheduler.install(sys.modules[__name__])
 announcement_ui.api = sys.modules[__name__]
+shopify_discord.install(sys.modules[__name__])
+shopify_events.install(sys.modules[__name__])
 
 
 if __name__=='__main__':
