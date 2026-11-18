@@ -1149,6 +1149,223 @@ async def admin_milestone_test_reset(
     )
 
 
+# Quest auto-completion is exclusively for the invoking server admin's test account.
+# Synthetic awards are clearly marked in the XP audit; real members still need
+# their usual evidence, Shopify verification, and Discord boost event.
+WEEKLY_TEST_XP = {'training1': 50, 'training2': 50, 'gym': 25, 'hobby': 25}
+
+
+def admin_complete_weekly_test(gid: int, uid: int) -> dict:
+    """Fill only missing current-week objectives and auto-turn in exactly once."""
+    wk = week_key()
+    awarded = 0
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        if db.execute(
+            "SELECT 1 FROM pauses p WHERE p.guild_id=? AND p.user_id=? AND p.week_key=? "
+            "AND NOT EXISTS (SELECT 1 FROM resumed_pauses r WHERE r.guild_id=p.guild_id "
+            "AND r.user_id=p.user_id AND r.week_key=p.week_key)",
+            (gid, uid, wk),
+        ).fetchone():
+            return {'paused': True, 'objectives': 0, 'completion': False, 'streak_awards': []}
+        for idx, (kind, xp) in enumerate(WEEKLY_TEST_XP.items()):
+            exists = db.execute(
+                'SELECT 1 FROM weekly_actions WHERE guild_id=? AND user_id=? '
+                'AND week_key=? AND kind=?', (gid, uid, wk, kind),
+            ).fetchone()
+            if exists:
+                continue
+            # Generate unique negative placeholder message IDs; no Discord proof
+            # message is fabricated. Never collide with a real message ID.
+            least = db.execute(
+                'SELECT MIN(message_id) AS lowest FROM weekly_actions'
+            ).fetchone()['lowest']
+            fake_id = min(0, least or 0) - 1
+            action_day = (datetime.fromisoformat(wk).date()
+                          + timedelta(days=idx)).isoformat()
+            db.execute(
+                'INSERT INTO weekly_actions VALUES (?,?,?,?,?,?,?,?)',
+                (gid, uid, wk, kind, action_day, fake_id,
+                 f'admin-test:{gid}:{uid}:{wk}:{kind}', utc_now().isoformat()),
+            )
+            add_xp(gid, uid, xp, f'Weekly {wk} {kind}', db)
+            awarded += 1
+            grant_once(db, 'starter_claims', gid, uid, 'first_steps',
+                       STARTER_REWARDS['first_steps'])
+        kinds = {r['kind'] for r in db.execute(
+            'SELECT kind FROM weekly_actions WHERE guild_id=? AND user_id=? AND week_key=?',
+            (gid, uid, wk),
+        )}
+        complete = False
+        if set(WEEKLY_TEST_XP).issubset(kinds):
+            complete = db.execute(
+                'INSERT OR IGNORE INTO weekly_completions VALUES (?,?,?,?)',
+                (gid, uid, wk, utc_now().isoformat()),
+            ).rowcount > 0
+            if complete:
+                add_xp(gid, uid, 50, 'Weekly completion ' + wk, db)
+                grant_once(db, 'milestone_claims', gid, uid, 'first_week',
+                           MILESTONE_XP['first_week'])
+    streak_awards = award_earned_streak_milestones(gid, uid) if complete else []
+    return {'paused': False, 'objectives': awarded,
+            'completion': complete, 'streak_awards': streak_awards}
+
+
+def admin_complete_starter_test(gid: int, uid: int) -> dict:
+    """Grant missing starter rewards without replaying a completed starter quest."""
+    added = 0
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        for kind, xp in STARTER_REWARDS.items():
+            added += int(grant_once(db, 'starter_claims', gid, uid, kind, xp))
+        turnin = db.execute(
+            'INSERT OR IGNORE INTO starter_turnins VALUES (?,?,?)',
+            (gid, uid, utc_now().isoformat()),
+        ).rowcount > 0
+    return {'objectives': added, 'turnin': turnin}
+
+
+def admin_complete_milestones_test(gid: int, uid: int) -> dict:
+    """Synthetic milestone claims for admin testing, including a labelled order.
+
+    This deliberately does not assert a real boost occurred, nor modify weekly
+    completion history. A pending genuine order review must be handled first.
+    """
+    awarded = []
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        if db.execute(
+            "SELECT 1 FROM purchase_orders WHERE guild_id=? AND user_id=? "
+            "AND status='pending' LIMIT 1", (gid, uid),
+        ).fetchone():
+            return {'blocked': True, 'awarded': [], 'completion': False}
+        old_completion = db.execute(
+            "SELECT 1 FROM milestone_claims WHERE guild_id=? AND user_id=? "
+            "AND kind='guild_completion'", (gid, uid),
+        ).fetchone() is not None
+        # Insert a synthetic, clearly labelled approved order only for the
+        # admin account when awarding its first purchase milestone.
+        has_purchase = db.execute(
+            "SELECT 1 FROM milestone_claims WHERE guild_id=? AND user_id=? "
+            "AND kind='purchase1'", (gid, uid),
+        ).fetchone() is not None
+        if not has_purchase:
+            label = f'ADMIN-TEST-{gid}-{uid}-{int(utc_now().timestamp() * 1000000)}'
+            db.execute(
+                "INSERT INTO purchase_orders "
+                "(guild_id,user_id,order_reference,status,submitted_at,reviewed_at,reviewed_by) "
+                "VALUES (?,?,?,'approved',?,?,?)",
+                (gid, uid, label, utc_now().isoformat(), utc_now().isoformat(), uid),
+            )
+        for kind, label, xp, description in MILESTONE_QUESTS:
+            if grant_once(db, 'milestone_claims', gid, uid, kind, xp):
+                awarded.append(kind)
+        completion = not old_completion and db.execute(
+            "SELECT 1 FROM milestone_claims WHERE guild_id=? AND user_id=? "
+            "AND kind='guild_completion'", (gid, uid),
+        ).fetchone() is not None
+    return {'blocked': False, 'awarded': awarded, 'completion': completion}
+
+
+def is_admin_quest_test_member(interaction: discord.Interaction) -> bool:
+    return (interaction.guild_id == GUILD_ID and
+            isinstance(interaction.user, discord.Member) and
+            interaction.user.guild_permissions.manage_guild)
+
+
+@bot.tree.command(name='admin_weekly_complete',
+                  description='Admin test: complete all your current weekly objectives')
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def admin_weekly_complete(interaction: discord.Interaction, confirm: bool):
+    if not is_admin_quest_test_member(interaction):
+        return await interaction.response.send_message('Admins only, in GYMGUILD.', ephemeral=True)
+    if not confirm:
+        return await interaction.response.send_message(
+            'Nothing changed. Set **confirm: True** to fill YOUR missing weekly objectives '
+            'with synthetic test records. This awards normal objective/completion XP '
+            'and can advance streaks. Existing weekly progress is preserved.',
+            ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    outcome = admin_complete_weekly_test(interaction.guild_id, interaction.user.id)
+    if outcome['paused']:
+        return await interaction.followup.send(
+            '⏸️ This week is paused. Resume XP first before test-completing it.',
+            ephemeral=True)
+    await update_rank(interaction.user, get_xp(interaction.guild_id, interaction.user.id))
+    await interaction.followup.send(
+        f'🧪 Weekly quest test complete: **{outcome["objectives"]}** new objectives; '
+        f'weekly completion **{"recorded" if outcome["completion"] else "already recorded"}**. '
+        f'🔥 Current streak: **{active_streak(interaction.guild_id, interaction.user.id)}** weeks. '
+        f'New streak milestones: **{len(outcome["streak_awards"])}**.',
+        ephemeral=True)
+
+
+@bot.tree.command(name='admin_starter_complete',
+                  description='Admin test: complete your starter quest and unlock Guild access')
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def admin_starter_complete(interaction: discord.Interaction, confirm: bool):
+    if not is_admin_quest_test_member(interaction):
+        return await interaction.response.send_message('Admins only, in GYMGUILD.', ephemeral=True)
+    if not confirm:
+        return await interaction.response.send_message(
+            'Nothing changed. Set **confirm: True** to award YOUR missing Starter Quest XP, '
+            'mark the quest turned in, and grant the configured Guild Member access role.',
+            ephemeral=True)
+    role = interaction.guild.get_role(STARTER_ACCESS_ROLE_ID) if STARTER_ACCESS_ROLE_ID else None
+    if role is None:
+        return await interaction.response.send_message(
+            'Starter role is not configured; no XP or progress was changed.', ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    if role not in interaction.user.roles:
+        try:
+            await interaction.user.add_roles(role, reason='Admin self-test Starter Quest completion')
+        except (discord.Forbidden, discord.HTTPException):
+            return await interaction.followup.send(
+                'Cannot assign the Guild Member role; no Starter Quest progress was changed.',
+                ephemeral=True)
+    result = admin_complete_starter_test(interaction.guild_id, interaction.user.id)
+    await update_rank(interaction.user, get_xp(interaction.guild_id, interaction.user.id),
+                      announce=False)
+    await interaction.followup.send(
+        f'🧪 Starter Quest complete: **{result["objectives"]}** newly awarded objectives '
+        f'and **{"new" if result["turnin"] else "existing"}** turn-in. '
+        'Guild Member access has been granted.',
+        ephemeral=True)
+
+
+@bot.tree.command(name='admin_milestones_complete',
+                  description='Admin test: complete all six of your milestone quests')
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def admin_milestones_complete(interaction: discord.Interaction, confirm: bool):
+    if not is_admin_quest_test_member(interaction):
+        return await interaction.response.send_message('Admins only, in GYMGUILD.', ephemeral=True)
+    if not confirm:
+        return await interaction.response.send_message(
+            'Nothing changed. Set **confirm: True** to test-award YOUR six milestone '
+            'objectives and any unclaimed +500 XP Main Quest bonus. This simulates '
+            'a verified purchase and server boost; it does NOT make a real purchase '
+            'or boost the server. An existing pending order must be resolved first.',
+            ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    result = admin_complete_milestones_test(interaction.guild_id, interaction.user.id)
+    if result['blocked']:
+        return await interaction.followup.send(
+            'You have a pending Order XP review. Cancel or resolve it first; nothing changed.',
+            ephemeral=True)
+    await update_rank(interaction.user, get_xp(interaction.guild_id, interaction.user.id))
+    await interaction.followup.send(
+        f'🧪 Milestones test complete: **{len(result["awarded"])}** new milestones; '
+        f'Main Quest completion **{"awarded" if result["completion"] else "already claimed"}**. '
+        'Synthetic purchase and boost achievements are for testing only.',
+        ephemeral=True)
+
+
 def longest_streak(gid: int, uid: int) -> int:
     """Longest run of completed weeks, including admin credits; pauses preserve runs."""
     completed, paused = streak_weeks(gid, uid)
