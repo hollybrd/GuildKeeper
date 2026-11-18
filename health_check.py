@@ -166,6 +166,15 @@ async def run(api, guild):
     core += check_channels(api, guild)
     core += check_roles(api, guild)
     try:
+        problems = api.announcements_scheduler.failed_count()
+        core.append(status('Announcement deliveries',
+                           'problem' if problems else 'current',
+                           f'{problems} failed or uncertain sends requiring review' if problems
+                           else 'No failed or uncertain scheduled notices'))
+    except Exception as exc:
+        core.append(status('Announcement deliveries', 'unknown',
+                           'Cannot inspect scheduled notices: ' + type(exc).__name__))
+    try:
         last = admin_maintenance.last_report(api)
         if not last:
             core.append(status('Startup panel maintenance', 'unknown',
@@ -221,7 +230,7 @@ def render(report):
                     value='\n'.join(panel_lines)[:1024] or 'No panels could be inspected',
                     inline=False)
 
-    runtime_names = {'Discord connection', 'Gateway latency', 'Scheduled jobs', 'Database', 'Startup panel maintenance'}
+    runtime_names = {'Discord connection', 'Gateway latency', 'Scheduled jobs', 'Database', 'Startup panel maintenance', 'Announcement deliveries'}
     groups = [('Runtime & database', [c for c in report['core'] if c['name'] in runtime_names]),
               ('Scheduled task details', [c for c in report['core'] if c['name'].startswith('Job: ')]),
               ('Channel permissions & roles', [c for c in report['core']
