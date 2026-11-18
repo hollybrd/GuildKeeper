@@ -253,8 +253,8 @@ class TestingCheatsTests(unittest.TestCase):
         self.assertEqual([item.label for item in view.children],
                          ['Add / Remove XP', 'Complete Quest', 'Starter Reset', 'Weekly Reset',
                           'Add / Remove Streak', 'Pause Reset', 'Rank Test Reset',
-                          'Reward Reset', 'Milestone Reset', 'All Test Commands'])
-        self.assertEqual([b.row for b in view.children], [0,0,0,0,1,1,1,2,2,2])
+                          'Reward Reset', 'Milestone Reset', 'Test Runner', 'All Test Commands'])
+        self.assertEqual([b.row for b in view.children], [0,0,0,0,1,1,1,2,2,3,2])
 
     def test_member_actions_require_confirmation(self):
         import testing_cheats

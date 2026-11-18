@@ -10,6 +10,7 @@ import sys
 
 import admin_hub
 import testing_cheats
+import test_runner
 import admin_maintenance
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -4130,6 +4131,7 @@ async def on_app_command_error(interaction, error):
 
 admin_hub.install(sys.modules[__name__])
 testing_cheats.install(sys.modules[__name__])
+test_runner.install(sys.modules[__name__])
 
 
 if __name__=='__main__':
