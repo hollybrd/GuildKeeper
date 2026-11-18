@@ -3488,8 +3488,8 @@ class PlayerStatsView(discord.ui.View):
         if interaction.guild_id != GUILD_ID:
             return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
         await interaction.response.send_message(
-            profile_progress_text(interaction.guild_id, interaction.user.id, interaction.user.display_name),
-            ephemeral=True)
+            embed=ranks_progress_embed(interaction.guild_id, interaction.user.id),
+            view=RankProfileButtonView(interaction.user.id), ephemeral=True)
 
     @discord.ui.button(label='Pauses', emoji='⏸️', style=discord.ButtonStyle.primary,
                        custom_id='guildkeeper:stats:activate_pause', row=1)
@@ -3636,7 +3636,7 @@ def pause_panel_text(gid: int, uid: int) -> str:
         f'**Current week:** {current_week}\n'
         f'{status}\n{explanation}\n'
         f'**Next weekly reset:** <t:{int(next_reset().timestamp())}:F>\n\n'
-        '⚠️ **Using a pause is irreversible.** Activating consumes one of your two '
+        '⚠️ **This action cannot be undone.** Activating consumes one of your two '
         'pauses immediately and suspends weekly XP accumulation. Resuming XP '
         '**does not return your pause**; it only allows you to earn XP again. '
         'Used pauses replenish only when they fall outside the rolling 13-week window.'
