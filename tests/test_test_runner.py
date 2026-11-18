@@ -1,4 +1,12 @@
-"""Tests for GuildKeeper's non-destructive guided Discord acceptance runner."""
+"""Tests for GuildKeeper's non-destructive guided Discord acceptance runner.
+
+READING GUIDE
+-------------
+Tests the staff-guided acceptance checklist itself: read-only player snapshots, permission checks and saved human-reported results.
+
+Each setUp() uses a temporary SQLite database rather than GuildKeeper's
+real player database. Assertions compare actual results with expected rules.
+"""
 import tempfile
 import unittest
 from pathlib import Path
