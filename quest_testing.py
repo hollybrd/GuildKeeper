@@ -3,12 +3,21 @@
 Synthetic progress is written to the real GuildKeeper database, always marked for
 testing in the audit trail. This module is only called from owner-checked,
 Manage-Server-protected ephemeral Testing Cheats views.
+
+
+READING GUIDE
+-------------
+These are *admin testing cheats*, NOT normal player actions. They write
+synthetic progress to the real database so moderators can test ranks and panels.
+Access control belongs to the private Testing Cheats UI; call this helper
+only after it has validated moderator permissions.
 """
 from datetime import timedelta
 
 WEEKLY_REWARDS = {'training1': 50, 'training2': 50, 'gym': 25, 'hobby': 25}
 
 
+# Define the objectives that can be selected for each quest category.
 def options(api, category):
     if category == 'weekly':
         return [('all', 'All remaining objectives')] + [
@@ -31,6 +40,7 @@ def options(api, category):
     raise ValueError('Unknown quest category')
 
 
+# Calculate what a cheat would award without changing member progress.
 def preview(api, gid, uid, category, choice):
     valid = dict(options(api, category))
     if choice not in valid:
@@ -69,12 +79,14 @@ def preview(api, gid, uid, category, choice):
         return missing, xp
 
 
+# Use unique negative IDs so synthetic training actions cannot collide with real Discord messages.
 def _synthetic_message_id(db):
     row = db.execute('SELECT MIN(message_id) AS minimum FROM weekly_actions WHERE message_id<0').fetchone()
     minimum = row['minimum']
     return (minimum - 1) if minimum is not None else -1
 
 
+# Apply only missing quest objectives, transactionally, avoiding repeat XP awards.
 def complete(api, gid, uid, category, choice, actor_id):
     """Transactionally complete only missing objectives, preserving idempotency.
 
@@ -150,6 +162,7 @@ def complete(api, gid, uid, category, choice, actor_id):
     return result
 
 
+# After database changes, synchronize real Discord access/rank roles for that member.
 async def apply_to_member(api, member, category, choice, actor_id):
     gid, uid = member.guild.id, member.id
     missing, xp, completed_week = complete(api, gid, uid, category, choice, actor_id)
