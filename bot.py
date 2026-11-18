@@ -154,7 +154,7 @@ def setup_db():
             if col not in columns:
                 db.execute(f'ALTER TABLE reward_tickets ADD COLUMN {col} TEXT')
         db.execute('INSERT OR IGNORE INTO v12_config(key,value) VALUES (?,?)',('activation_week',week_key()))
-        # Backfill the one-time Guild Completion reward for members who
+        # Backfill the one-time Main Quest Completion reward for members who
         # completed all six milestones before this feature was introduced.
         # Existing milestone claims remain untouched; grant_once is idempotent.
         historic_members = db.execute(
@@ -957,7 +957,7 @@ def milestone_quests_embed(gid: int, uid: int) -> discord.Embed:
         title='✦ GYMGUILD — MILESTONE QUESTS',
         description=(
             f'**Completed: {progress["completed"]}/{progress["total"]}** permanent milestones\n'
-            f'Complete them all to receive a one-time **+{MILESTONE_COMPLETION_BONUS} XP** Guild Completion bonus! '
+            f'Complete them all to receive a one-time **+{MILESTONE_COMPLETION_BONUS} XP** Main Quest Completion bonus! '
             'Your milestones remain unlocked even if you lose XP or your streak later breaks.'
         ),
         colour=discord.Colour.from_rgb(104, 163, 153),
@@ -980,7 +980,7 @@ def milestone_quests_embed(gid: int, uid: int) -> discord.Embed:
             inline=False,
         )
     embed.add_field(
-        name='🏆 Guild Completion — +500 XP',
+        name='🏆 Main Quest Completion — +500 XP',
         value='✅ Claimed permanently!' if progress['bonus_earned']
               else f'🔒 {progress["completed"]}/{progress["total"]} milestones completed',
         inline=False,
@@ -1795,7 +1795,7 @@ def order_rewards_text(gid: int, uid: int) -> str:
         '**🛍️ Order XP**\n'
         f'Approved orders: **{summary["approved"]}** · Pending: **{summary["pending"]}**\n'
         f'First purchase: {first}\n'
-        f'**🏆 Guild Completion:** {completion}\n'
+        f'**🏆 Main Quest Completion:** {completion}\n'
         'Submit order references from **Milestone Quests** in the Player Hub.'
     )
 
@@ -1973,7 +1973,7 @@ def milestone_board_embed() -> discord.Embed:
             'Complete special Guild achievements to earn permanent one-time XP rewards. '
             'Select **My Progress** to view what you have unlocked privately, '
             'or **Submit Order XP** to send a Shopify order for moderator approval.\n\n'
-            '**All six milestones unlock a one-time +500 XP Guild Completion bonus!**'
+            '**All six milestones unlock a one-time +500 XP Main Quest Completion bonus!**'
         ),
         colour=discord.Colour.from_rgb(104, 163, 153),
     )
