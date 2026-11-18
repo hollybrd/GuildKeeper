@@ -343,6 +343,7 @@ class Guildkeeper(commands.Bot):
         self.add_view(StarterTurnInView())
         self.add_view(WeeklyTurnInView())
         self.add_view(PlayerStatsView())
+        self.add_view(MilestoneBoardView())
         self.add_view(RewardTicketAdminView())
         # Register outstanding review buttons after restarts.
         with connect() as db:
@@ -1962,6 +1963,100 @@ async def submit_order_from_interaction(interaction: discord.Interaction, refere
     await interaction.followup.send(
         message, embed=order_xp_embed(interaction.guild_id, interaction.user.id),
         view=OrderXPView(interaction.user.id), ephemeral=True,
+    )
+
+
+def milestone_board_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title='✦ GYMGUILD — MILESTONE QUESTS',
+        description=(
+            'Complete special Guild achievements to earn permanent one-time XP rewards. '
+            'Select **My Progress** to view what you have unlocked privately, '
+            'or **Submit Order XP** to send a Shopify order for moderator approval.\n\n'
+            '**All six milestones unlock a one-time +500 XP Guild Completion bonus!**'
+        ),
+        colour=discord.Colour.from_rgb(104, 163, 153),
+    )
+    for _, name, xp, description in MILESTONE_QUESTS:
+        embed.add_field(name=f'✦ {name} — {xp} XP', value=description, inline=False)
+    embed.set_footer(text='GYMGUILD ✦ Where culture meets strength')
+    return embed
+
+
+class MilestoneBoardView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label='My Progress', emoji='🏆', style=discord.ButtonStyle.secondary,
+                       custom_id='guildkeeper:milestones:progress')
+    async def my_progress(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID:
+            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
+        await interaction.response.send_message(
+            embed=milestone_quests_embed(interaction.guild_id, interaction.user.id),
+            view=MilestoneQuestsView(interaction.user.id), ephemeral=True,
+        )
+
+    @discord.ui.button(label='Submit Order XP', emoji='🛍️', style=discord.ButtonStyle.primary,
+                       custom_id='guildkeeper:milestones:submit_order')
+    async def submit_order(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID:
+            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
+        await interaction.response.send_modal(OrderReferenceModal())
+
+
+@bot.tree.command(
+    name='admin_milestone_post',
+    description='Moderator: post or refresh the permanent Milestone Quests panel',
+)
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def admin_milestone_post(
+    interaction: discord.Interaction, channel: discord.TextChannel,
+):
+    if interaction.guild_id != GUILD_ID or channel.guild.id != GUILD_ID:
+        return await interaction.response.send_message(
+            'Choose a text channel in GYMGUILD.', ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    config_key = f'milestone-board-{GUILD_ID}'
+    with connect() as db:
+        row = db.execute(
+            'SELECT value FROM v12_config WHERE key=?', (config_key,),
+        ).fetchone()
+    previous = None
+    previous_channel = None
+    if row:
+        try:
+            channel_id, message_id = map(int, row['value'].split(':'))
+            previous_channel = interaction.guild.get_channel(channel_id)
+            if isinstance(previous_channel, discord.TextChannel):
+                previous = await previous_channel.fetch_message(message_id)
+        except (ValueError, discord.NotFound, discord.Forbidden, discord.HTTPException):
+            previous = None
+    try:
+        if previous is not None and previous_channel.id == channel.id:
+            await previous.edit(embed=milestone_board_embed(), view=MilestoneBoardView())
+            message = previous
+        else:
+            message = await channel.send(
+                embed=milestone_board_embed(), view=MilestoneBoardView())
+            if previous is not None:
+                try:
+                    await previous.delete()
+                except (discord.Forbidden, discord.HTTPException):
+                    log.warning('Old milestone board could not be deleted')
+    except (discord.Forbidden, discord.HTTPException):
+        log.exception('Failed to post milestone board')
+        return await interaction.followup.send(
+            'Could not post the board. Check View Channel, Send Messages, '
+            'Embed Links and Manage Messages permissions.', ephemeral=True)
+    with connect() as db:
+        db.execute(
+            'INSERT OR REPLACE INTO v12_config(key,value) VALUES (?,?)',
+            (config_key, f'{channel.id}:{message.id}'),
+        )
+    await interaction.followup.send(
+        f'✅ Milestone Quests panel posted or refreshed in {channel.mention}.', ephemeral=True,
     )
 
 
