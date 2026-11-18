@@ -4067,6 +4067,14 @@ async def scheduler():
                                              name=name, success=False, error=type(error).__name__)
             except Exception:
                 log.exception('Could not persist failure of scheduled task %s', name)
+    # Auto-repair missing/outdated permanent buttons periodically as well as on startup.
+    try:
+        if admin_maintenance.needs_periodic_check(sys.modules[__name__]):
+            guild = bot.get_guild(GUILD_ID)
+            if guild is not None:
+                await admin_maintenance.reconcile(sys.modules[__name__], guild)
+    except Exception:
+        log.exception('Periodic permanent panel maintenance failed')
 
 @scheduler.before_loop
 async def before_scheduler():
