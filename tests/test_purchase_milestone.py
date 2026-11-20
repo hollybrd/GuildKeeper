@@ -349,7 +349,15 @@ class PurchaseMilestoneTests(unittest.TestCase):
         self.assertEqual(bot.admin_complete_starter_test(self.gid, self.uid),
                          {'objectives': 0, 'turnin': False})
         self.assertEqual(bot.get_xp(self.gid, self.uid), 50)
-        self.assertEqual(bot.starter_progress_text(self.gid, self.uid).count('✅'), 5)
+        self.assertIn('**5/5 objectives completed.**', bot.starter_progress_text(self.gid, self.uid))
+        with bot.connect() as db:
+            claims = {row['kind'] for row in db.execute(
+                'SELECT kind FROM starter_claims WHERE guild_id=? AND user_id=?',
+                (self.gid, self.uid))}
+            self.assertEqual(claims, set(bot.STARTER_REWARDS))
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM starter_posts WHERE guild_id=? AND user_id=?',
+                (self.gid, self.uid)).fetchone()[0], 0)
         with bot.connect() as db:
             self.assertEqual(db.execute(
                 'SELECT COUNT(*) FROM starter_turnins WHERE guild_id=? AND user_id=?',
