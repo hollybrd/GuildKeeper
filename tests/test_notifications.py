@@ -1,0 +1,153 @@
+"""Private GuildKeeper inbox and DM preference regression tests.
+
+READING GUIDE
+-------------
+Uses a temporary database to verify private Inbox records, DM opt-out rules, pause notices and one-time streak warnings; no actual DM is sent.
+
+Each setUp() uses a temporary SQLite database rather than GuildKeeper's
+real player database. Assertions compare actual results with expected rules.
+"""
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+from datetime import datetime, timezone
+
+import bot
+
+
+class NotificationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.original_db = bot.DB
+        bot.DB = Path(self.tmp.name) / 'notifications.db'
+        bot.setup_db()
+        self.gid = 12345
+        self.uid = 98765
+
+    def tearDown(self):
+        bot.DB = self.original_db
+        self.tmp.cleanup()
+
+    def test_quest_progress_shows_active_or_inactive_pause(self):
+        self.assertIn('No active pause', bot.weekly_progress_text(self.gid, self.uid))
+        self.assertIn('No active pause', bot.starter_progress_text(self.gid, self.uid))
+        self.assertIn('No active pause', bot.milestone_quests_embed(self.gid, self.uid).fields[-1].value)
+        with bot.connect() as db:
+            db.execute('INSERT INTO pauses(guild_id,user_id,week_key,created_at) VALUES (?,?,?,?)',
+                       (self.gid, self.uid, bot.week_key(), bot.utc_now().isoformat()))
+        self.assertIn('Pause ACTIVE', bot.weekly_progress_text(self.gid, self.uid))
+        self.assertIn('no Weekly Side Quest XP', bot.starter_progress_text(self.gid, self.uid))
+        self.assertIn('Pause ACTIVE', bot.milestone_quests_embed(self.gid, self.uid).fields[-1].value)
+        with bot.connect() as db:
+            db.execute('INSERT INTO resumed_pauses(guild_id,user_id,week_key,resumed_at) VALUES (?,?,?,?)',
+                       (self.gid, self.uid, bot.week_key(), bot.utc_now().isoformat()))
+        self.assertIn('weekly XP earning has resumed', bot.weekly_progress_text(self.gid, self.uid))
+
+    def test_pause_buttons_follow_current_state(self):
+        labels = {b.label: b for b in bot.PausePanelView(self.uid).children}
+        self.assertFalse(labels['Activate Pause'].disabled)
+        self.assertTrue(labels['Resume XP'].disabled)
+        with bot.connect() as db:
+            db.execute('INSERT INTO pauses(guild_id,user_id,week_key,created_at) VALUES (?,?,?,?)',
+                       (self.gid, self.uid, bot.week_key(), bot.utc_now().isoformat()))
+        with self.subTest('paused'):
+            self.assertEqual(bot.pause_button_state(self.gid, self.uid), (False, True))
+        with bot.connect() as db:
+            db.execute('INSERT INTO resumed_pauses(guild_id,user_id,week_key,resumed_at) VALUES (?,?,?,?)',
+                       (self.gid, self.uid, bot.week_key(), bot.utc_now().isoformat()))
+        self.assertEqual(bot.pause_button_state(self.gid, self.uid), (False, False))
+
+    def test_reward_buttons_show_locked_available_and_claimed(self):
+        original_gid = bot.GUILD_ID
+        bot.GUILD_ID = self.gid
+        try:
+            view = bot.RewardChoiceView(self.uid)
+            self.assertTrue(next(b for b in view.children if b.label.startswith('Master')).disabled)
+            with bot.connect() as db:
+                db.execute('INSERT INTO rank_unlocks(guild_id,user_id,rank,unlocked_at) VALUES (?,?,?,?)',
+                           (self.gid, self.uid, 'Master', bot.utc_now().isoformat()))
+            unlocked = bot.RewardChoiceView(self.uid)
+            self.assertFalse(next(b for b in unlocked.children if b.label.startswith('Master')).disabled)
+            with bot.connect() as db:
+                db.execute(
+                    "INSERT INTO reward_tickets(guild_id,user_id,rank,channel_id,status,requested_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (self.gid, self.uid, 'Master', 51234, 'open', bot.utc_now().isoformat()))
+            claimed = bot.RewardChoiceView(self.uid)
+            button = next(b for b in claimed.children if b.label.startswith('Master'))
+            self.assertTrue(button.disabled)
+            self.assertIn('Claimed', button.label)
+        finally:
+            bot.GUILD_ID = original_gid
+
+    def test_dm_preferences_disable_unavailable_action(self):
+        original_gid = bot.GUILD_ID
+        bot.GUILD_ID = self.gid
+        try:
+            enabled = bot.BotDMToggleView(self.uid)
+            self.assertTrue(next(b for b in enabled.children if b.label == 'Enable Bot DMs').disabled)
+            bot.set_bot_dms(self.gid, self.uid, False)
+            disabled = bot.BotDMToggleView(self.uid)
+            self.assertTrue(next(b for b in disabled.children if b.label == 'Disable Bot DMs').disabled)
+        finally:
+            bot.GUILD_ID = original_gid
+
+    def test_dm_preference_defaults_enabled_and_persists(self):
+        self.assertTrue(bot.bot_dms_enabled(self.gid, self.uid))
+        bot.set_bot_dms(self.gid, self.uid, False)
+        self.assertFalse(bot.bot_dms_enabled(self.gid, self.uid))
+        bot.set_bot_dms(self.gid, self.uid, True)
+        self.assertTrue(bot.bot_dms_enabled(self.gid, self.uid))
+
+    def test_xp_award_and_deduction_stay_in_the_inbox_and_audit_log(self):
+        bot.add_xp(self.gid, self.uid, 50, 'Starter reward')
+        bot.add_xp(self.gid, self.uid, -25, 'Inactive week 2026-11-16')
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 25)
+        self.assertIn('Starter reward', bot.inbox_text(self.gid, self.uid, 'all'))
+        self.assertIn('Inactive week', bot.inbox_text(self.gid, self.uid, 'xp'))
+        with bot.connect() as db:
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) n FROM xp_log WHERE guild_id=? AND user_id=?',
+                (self.gid, self.uid)).fetchone()['n'], 2)
+
+    def test_notification_deduplication_and_read_status(self):
+        with bot.connect() as db:
+            for _ in range(2):
+                bot.record_notification(db, self.gid, self.uid, 'streak',
+                                        'Deadline', 'Finish your quest', 'weekly-warning:2026-11-16')
+        with bot.connect() as db:
+            count = db.execute('SELECT COUNT(*) n FROM player_notifications').fetchone()['n']
+            self.assertEqual(count, 1)
+            db.execute('UPDATE player_notifications SET read_at=? WHERE guild_id=? AND user_id=?',
+                       (bot.utc_now().isoformat(), self.gid, self.uid))
+        self.assertIn('No notifications', bot.inbox_text(self.gid, self.uid, 'unread'))
+        self.assertIn('Deadline', bot.inbox_text(self.gid, self.uid, 'all'))
+
+    def test_reenabling_dms_does_not_replay_older_alerts(self):
+        bot.set_bot_dms(self.gid, self.uid, False)
+        bot.add_xp(self.gid, self.uid, -25, 'Inactive')
+        bot.set_bot_dms(self.gid, self.uid, True)
+        with bot.connect() as db:
+            row = db.execute('SELECT dm_sent_at FROM player_notifications LIMIT 1').fetchone()
+        self.assertIsNotNone(row['dm_sent_at'])
+
+    def test_sunday_warning_is_saved_once_and_respects_pause(self):
+        original_gid = bot.GUILD_ID
+        bot.GUILD_ID = self.gid
+        try:
+            with bot.connect() as db:
+                db.execute('INSERT INTO members(guild_id,user_id,xp) VALUES (?,?,?)',
+                           (self.gid, self.uid, 50))
+                db.execute('INSERT INTO starter_turnins(guild_id,user_id,turned_in_at) VALUES (?,?,?)',
+                           (self.gid, self.uid, bot.utc_now().isoformat()))
+            # 22 November 2026 is a Sunday.
+            with patch.object(bot, 'utc_now', return_value=datetime(2026, 11, 22, 12, tzinfo=timezone.utc)):
+                bot.create_streak_warnings()
+                bot.create_streak_warnings()
+            with bot.connect() as db:
+                self.assertEqual(db.execute(
+                    "SELECT COUNT(*) n FROM player_notifications WHERE category='streak'"
+                ).fetchone()['n'], 1)
+        finally:
+            bot.GUILD_ID = original_gid

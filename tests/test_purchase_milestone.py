@@ -1,4 +1,12 @@
-"""Order XP panel storage and moderator review regression tests."""
+"""Order XP panel storage and moderator review regression tests.
+
+READING GUIDE
+-------------
+Tests that purchase requests need a moderator decision, cannot double-award milestone XP, and do not erase other member rewards when reset.
+
+Each setUp() uses a temporary SQLite database rather than GuildKeeper's
+real player database. Assertions compare actual results with expected rules.
+"""
 import tempfile
 import unittest
 from datetime import timedelta
@@ -180,7 +188,7 @@ class PurchaseMilestoneTests(unittest.TestCase):
         self.assertGreater(rewards['purchase1'], max(
             amount for key, amount in rewards.items() if key != 'purchase1'))
         panel = bot.milestone_board_embed()
-        self.assertEqual(panel.title, '✦ GYMGUILD — MILESTONE QUESTS ✦')
+        self.assertEqual(panel.title, '✦ GYMGUILD  -  MILESTONE QUESTS ✦')
         self.assertTrue(panel.fields[0].name.startswith('🎯'))
         self.assertTrue(panel.fields[-1].name.startswith('🛍️'))
         self.assertTrue(all('\n' in field.value for field in panel.fields))
@@ -273,7 +281,25 @@ class PurchaseMilestoneTests(unittest.TestCase):
         )
         hub = bot.PlayerStatsView()
         self.assertTrue(hub.is_persistent())
-        self.assertIn('Milestone Quests', {button.label for button in hub.children})
+        self.assertNotIn('Milestone Quests', {button.label for button in hub.children})
+        self.assertEqual(len(hub.children), 9)
+        self.assertNotIn('Resume XP', {button.label for button in hub.children})
+        self.assertEqual([button.label for button in bot.AllQuestsView(self.uid).children], ['Refresh Quests'])
+        self.assertEqual(
+            [(button.label, button.row) for button in hub.children],
+            [('Profile', None), ('Streak', None), ('Ranks', None),
+             ('Pauses', 1),
+             ('Inbox', 2), ('Bot DMs', 2), ('Claim Reward', 1),
+             ('All Quests', 1), ('Guild Blast', 2)],
+        )
+        pause_labels = [b.label for b in bot.PausePanelView(self.uid).children]
+        self.assertEqual(pause_labels, ['Activate Pause', 'Resume XP', 'Refresh'])
+        pause_display = bot.pause_panel_text(self.gid, self.uid)
+        self.assertIn('Pauses remaining:', pause_display)
+        self.assertIn('No active pause', pause_display)
+        self.assertIn('cannot be undone', pause_display)
+        self.assertEqual(len(bot.PrivateProgressView(self.uid, 'profile').children), 1)
+        self.assertEqual([b.label for b in bot.RankProfileButtonView(self.uid).children], ['View Rank'])
         self.assertLessEqual(len(hub.children), 25)
 
     def test_one_lifetime_submission_persists_after_restart(self):
@@ -679,3 +705,4 @@ class PurchaseMilestoneTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

@@ -1,4 +1,25 @@
-"""GYMGUILD Guildkeeper V1 — Discord slash-command community bot."""
+"""GYMGUILD Guildkeeper V1  -  Discord slash-command community bot.
+
+READING GUIDE
+-------------
+This is GuildKeeper's main program (the "wiring" for the Discord bot).
+It loads settings from .env, defines the SQLite player data, and connects
+Discord events/buttons to quest, rank, streak and reward logic.
+
+HOW TO FOLLOW AN ACTION
+1. A Discord event, slash command, or button callback receives an interaction.
+2. The handler checks the server/member and reads or updates SQLite via connect().
+3. Shared helpers such as add_xp(), grant_once() and update_rank() keep rewards
+   consistent and prevent duplicate claims.
+4. Messages, ephemeral UI updates or notifications show the result to the member.
+
+OTHER MODULES
+admin_hub.py and testing_cheats.py are the staff menus; shopify_discord.py
+renders the shop; shopify_client.py communicates with Shopify;
+announcements_scheduler.py runs scheduled posts; health_check.py and
+panel_health.py verify configuration and saved Discord messages.
+The main scheduler near the bottom runs small recurring maintenance jobs.
+"""
 import asyncio
 import logging
 import os
@@ -6,6 +27,19 @@ import re
 import random
 import hashlib
 import sqlite3
+import sys
+
+import admin_hub
+import testing_cheats
+import test_runner
+import announcements_scheduler
+import announcement_ui
+import message_scheduler_panel
+import shopify_client
+import shopify_discord
+import shopify_rewards
+import shopify_events
+import admin_maintenance
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -55,6 +89,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger('guildkeeper')
 
 
+# Open a short-lived SQLite connection. `with connect()` commits successful changes and rolls back failed transactions.
 def connect():
     conn = sqlite3.connect(DB)
     conn.row_factory = sqlite3.Row
@@ -63,6 +98,7 @@ def connect():
     return conn
 
 
+# Create database tables if missing; existing members and XP survive bot restarts and deployments.
 def setup_db():
     with connect() as db:
         db.executescript('''
@@ -128,10 +164,21 @@ def setup_db():
           PRIMARY KEY(guild_id,user_id));
         CREATE TABLE IF NOT EXISTS schedule_posts (guild_id INTEGER NOT NULL, post_key TEXT NOT NULL,
           PRIMARY KEY(guild_id,post_key));
-        CREATE TABLE IF NOT EXISTS bot_dm_preferences (
-          guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
-          enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+        CREATE TABLE IF NOT EXISTS admin_hub_audit (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          guild_id INTEGER NOT NULL, actor_id INTEGER NOT NULL,
+          target_id INTEGER, action TEXT NOT NULL,
+          details TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_admin_hub_audit
+          ON admin_hub_audit(guild_id,id);
+        CREATE TABLE IF NOT EXISTS notification_preferences (
+          guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, dm_enabled INTEGER NOT NULL DEFAULT 1,
           PRIMARY KEY(guild_id,user_id));
+        CREATE TABLE IF NOT EXISTS player_notifications (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL, category TEXT NOT NULL, title TEXT NOT NULL,
+          body TEXT NOT NULL, event_key TEXT, created_at TEXT NOT NULL,
+          read_at TEXT, dm_sent_at TEXT, UNIQUE(guild_id,user_id,event_key));
         CREATE TABLE IF NOT EXISTS bot_dm_reminders (
           guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
           week_key TEXT NOT NULL, reminder_kind TEXT NOT NULL,
@@ -177,6 +224,7 @@ def setup_db():
             award_guild_completion_if_ready(db, prior['guild_id'], prior['user_id'])
 
 
+# Carry old quest week records into the Monday-based calendar without discarding member progress.
 def migrate_monday_week_keys():
     """One-time non-destructive migration of Sunday-based V1.2 quest week identifiers.
 
@@ -203,10 +251,12 @@ def migrate_monday_week_keys():
         db.execute('INSERT INTO v12_config(key,value) VALUES (?,?)', ('monday_midnight_migrated', utc_now().isoformat()))
 
 
+# Use a timezone-aware UTC timestamp for durable storage and event ordering.
 def utc_now():
     return datetime.now(timezone.utc)
 
 
+# Find weeks in which this member completed all four weekly objectives.
 def completed_weeks(guild_id, user_id):
     with connect() as db:
         return db.execute('SELECT COUNT(*) n FROM weekly_completions WHERE guild_id=? AND user_id=?',
@@ -215,23 +265,12 @@ def completed_weeks(guild_id, user_id):
 
 STREAK_REQUIREMENTS = {'Master': 2, 'Legend': 4, 'Paragon': 8}
 
-def bot_dm_enabled(gid: int, uid: int) -> bool:
-    """Reminders are enabled by default until explicitly disabled by a member."""
-    with connect() as db:
-        row = db.execute(
-            'SELECT enabled FROM bot_dm_preferences WHERE guild_id=? AND user_id=?',
-            (gid, uid),
-        ).fetchone()
-    return bool(row['enabled']) if row else True
+def bot_dm_enabled(gid, uid):
+    return bot_dms_enabled(gid, uid)
 
 
-def set_bot_dm_enabled(gid: int, uid: int, enabled: bool) -> None:
-    with connect() as db:
-        db.execute(
-            'INSERT INTO bot_dm_preferences(guild_id,user_id,enabled) VALUES (?,?,?) '
-            'ON CONFLICT(guild_id,user_id) DO UPDATE SET enabled=excluded.enabled',
-            (gid, uid, int(enabled)),
-        )
+def set_bot_dm_enabled(gid, uid, enabled):
+    set_bot_dms(gid, uid, enabled)
 
 
 def bot_dm_preference_text(enabled: bool) -> str:
@@ -247,6 +286,7 @@ def bot_dm_preference_text(enabled: bool) -> str:
     )
 
 
+# Build the set of credited weeks, including admin test credits, for streak calculations.
 def streak_weeks(gid, uid):
     with connect() as db:
         completed = {r['week_key'] for r in db.execute('SELECT week_key FROM weekly_completions WHERE guild_id=? AND user_id=?', (gid,uid))}
@@ -258,9 +298,10 @@ def streak_weeks(gid, uid):
             (gid, uid))}
     return completed, paused
 
-def active_streak(gid, uid):
+# Calculate the current consecutive streak, respecting pauses and missed weeks.
+def active_streak(gid, uid, now=None):
     completed, paused = streak_weeks(gid,uid)
-    cursor = week_start()
+    cursor = week_start(now)
     # An unfinished current week doesn't interrupt the completed streak yet.
     if cursor.date().isoformat() not in completed:
         cursor -= timedelta(days=7)
@@ -274,6 +315,7 @@ def active_streak(gid, uid):
         cursor -= timedelta(days=7)
     return count
 
+# Persist each rank when its requirements are met; unlocks remain earned even after XP changes.
 def unlock_earned_ranks(gid, uid, xp):
     """Persist earned ranks while an active streak qualifies; no rank loss from broken streaks."""
     if gid is None or uid is None:
@@ -284,6 +326,7 @@ def unlock_earned_ranks(gid, uid, xp):
             if name in STREAK_REQUIREMENTS and xp >= threshold and current >= STREAK_REQUIREMENTS[name]:
                 db.execute('INSERT OR IGNORE INTO rank_unlocks VALUES (?,?,?,?)', (gid,uid,name,utc_now().isoformat()))
 
+# Determine a displayed rank from XP, permanent unlocks and active-streak requirements.
 def rank_for(xp, guild_id=None, user_id=None):
     """A completed Starter Quest permanently unlocks Novice regardless of later XP loss."""
     if guild_id is not None and user_id is not None:
@@ -333,7 +376,7 @@ def streak_blocked_rank_notice(gid: int, uid: int, xp: int) -> str:
              'You have enough XP, but still need an active weekly streak to unlock:']
     for name, required in blocked:
         lines.append(
-            f'• **{name}** — **{streak}/{required} weeks** '
+            f'• **{name}**  -  **{streak}/{required} weeks** '
             f'(need **{required - streak}** more qualifying week(s)).'
         )
     lines.append(
@@ -361,12 +404,113 @@ def lifetime_objectives(guild_id: int, user_id: int) -> int:
     return starter + weekly
 
 
+# Read this member's current lifetime XP from the members table.
 def get_xp(guild_id, user_id):
     with connect() as db:
         row = db.execute('SELECT xp FROM members WHERE guild_id=? AND user_id=?', (guild_id,user_id)).fetchone()
         return row['xp'] if row else 0
 
 
+# Read the player's opt-in setting; DMs default on until switched off.
+def bot_dms_enabled(gid, uid):
+    with connect() as db:
+        row = db.execute('SELECT dm_enabled FROM notification_preferences WHERE guild_id=? AND user_id=?',
+                         (gid,uid)).fetchone()
+    return bool(row['dm_enabled']) if row else True
+
+
+# Store the user's preference without deleting their in-bot Inbox notifications.
+def set_bot_dms(gid, uid, enabled):
+    with connect() as db:
+        # Don't release old Inbox alerts as a DM backlog when a member opts in again.
+        db.execute('UPDATE player_notifications SET dm_sent_at=? '
+                   'WHERE guild_id=? AND user_id=? AND dm_sent_at IS NULL',
+                   (utc_now().isoformat(),gid,uid))
+        db.execute('INSERT INTO notification_preferences VALUES (?,?,?) '
+                   'ON CONFLICT(guild_id,user_id) DO UPDATE SET dm_enabled=excluded.dm_enabled',
+                   (gid,uid,int(enabled)))
+
+
+# Insert a notification only once for a given event key, preventing repeat alerts.
+def record_notification(db, gid, uid, category, title, body, key=None):
+    db.execute('INSERT OR IGNORE INTO player_notifications '
+               '(guild_id,user_id,category,title,body,event_key,created_at) VALUES (?,?,?,?,?,?,?)',
+               (gid,uid,category,title,body,key,utc_now().isoformat()))
+
+
+# Format stored notifications for the member's private Inbox.
+def inbox_text(gid, uid, mode='unread'):
+    with connect() as db:
+        if mode == 'xp':
+            rows = db.execute('SELECT amount,reason,created_at FROM xp_log '
+                              'WHERE guild_id=? AND user_id=? AND amount<0 ORDER BY id DESC LIMIT 12',
+                              (gid,uid)).fetchall()
+            if not rows:
+                return '📉 **Lost XP history**\nNo deductions recorded.'
+            lines = ['📉 **Lost XP history** (12 most recent)']
+            for r in rows:
+                date = datetime.fromisoformat(r['created_at']).strftime('%d %b %Y')
+                lines.append(f"• **{r['amount']} XP** · {date}  -  {discord.utils.escape_markdown(r['reason'])[:120]}")
+            lines.append('\nAdmin reversals are recorded separately in the XP audit log.')
+            return '\n'.join(lines)[:1900]
+        where = ' AND read_at IS NULL' if mode == 'unread' else ''
+        rows = db.execute('SELECT title,body,created_at,read_at FROM player_notifications '
+                          'WHERE guild_id=? AND user_id=?' + where + ' ORDER BY id DESC LIMIT 10',
+                          (gid,uid)).fetchall()
+        lines = ['🔔 **Unread notifications**' if mode == 'unread' else '📥 **All notifications**']
+        for r in rows:
+            date = datetime.fromisoformat(r['created_at']).strftime('%d %b %Y')
+            lines.append(('🔵 ' if not r['read_at'] else '') +
+                         f"**{discord.utils.escape_markdown(r['title'])[:80]}** · {date}\n" +
+                         discord.utils.escape_markdown(r['body'])[:150])
+        if not rows:
+            lines.append('No notifications here.')
+        return '\n\n'.join(lines)[:1900]
+
+
+# Send queued alerts privately while respecting each member's DM preference.
+async def deliver_notifications():
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        return
+    with connect() as db:
+        rows = db.execute('SELECT n.id,n.user_id,n.title,n.body FROM player_notifications n '
+                          'LEFT JOIN notification_preferences p ON p.guild_id=n.guild_id AND p.user_id=n.user_id '
+                          "WHERE n.guild_id=? AND n.category IN ('xp_loss','streak') AND n.dm_sent_at IS NULL AND COALESCE(p.dm_enabled,1)=1 "
+                          'ORDER BY n.id LIMIT 40',(GUILD_ID,)).fetchall()
+    for r in rows:
+        # Mark first to ensure retries do not spam members whose privacy settings change.
+        with connect() as db:
+            claimed = db.execute('UPDATE player_notifications SET dm_sent_at=? '
+                                 'WHERE id=? AND dm_sent_at IS NULL AND NOT EXISTS ('
+                                 'SELECT 1 FROM notification_preferences p '
+                                 'WHERE p.guild_id=player_notifications.guild_id '
+                                 'AND p.user_id=player_notifications.user_id AND p.dm_enabled=0)',
+                                 (utc_now().isoformat(),r['id'])).rowcount
+        if not claimed:
+            continue
+        try:
+            member = guild.get_member(r['user_id']) or await guild.fetch_member(r['user_id'])
+            await member.send(f"✦ **GuildKeeper  -  {r['title']}**\n{r['body']}\n\n"
+                              'Open your private Inbox in **#stats-and-streaks**. '
+                              'Bot DMs can be disabled in the Player Hub.',
+                              allowed_mentions=discord.AllowedMentions.none())
+        except (discord.NotFound,discord.Forbidden,discord.HTTPException):
+            log.info('GuildKeeper DM unavailable for %s',r['user_id'])
+
+
+# Create ahead-of-reset reminders for members who may lose streak/XP.
+def create_streak_warnings():
+    for candidate in bot_dm_reminder_candidates(GUILD_ID, include_opted_out=True):
+        with connect() as db:
+            kind = candidate['kind']
+            record_notification(db, GUILD_ID, candidate['user_id'], 'streak',
+                                'Weekly Quest Deadline',
+                                bot_dm_reminder_message(kind, candidate['streak'], candidate['objectives']),
+                                f"weekly-warning:{candidate['week_key']}:{kind}")
+
+
+# Update lifetime XP and write a reasoned history entry; clamp deductions at zero.
 def add_xp(guild_id, user_id, amount, reason, db=None):
     """Use an existing transaction for quest claims to make rewards atomic."""
     if db is None:
@@ -375,8 +519,12 @@ def add_xp(guild_id, user_id, amount, reason, db=None):
     db.execute('INSERT OR IGNORE INTO members(guild_id,user_id,xp) VALUES (?,?,0)', (guild_id,user_id))
     db.execute('UPDATE members SET xp=MAX(0,xp+?) WHERE guild_id=? AND user_id=?',
                (amount,guild_id,user_id))
-    db.execute('INSERT INTO xp_log(guild_id,user_id,amount,reason,created_at) VALUES (?,?,?,?,?)',
-               (guild_id,user_id,amount,reason,utc_now().isoformat()))
+    event = db.execute('INSERT INTO xp_log(guild_id,user_id,amount,reason,created_at) VALUES (?,?,?,?,?)',
+                       (guild_id,user_id,amount,reason,utc_now().isoformat()))
+    if amount:
+        record_notification(db,guild_id,user_id,'xp_loss' if amount<0 else 'xp',
+                            'XP Deducted' if amount<0 else 'XP Earned',
+                            f'{amount:+d} XP  -  {reason}',f'xp-log:{event.lastrowid}')
     return db.execute('SELECT xp FROM members WHERE guild_id=? AND user_id=?',
                       (guild_id,user_id)).fetchone()['xp']
 
@@ -384,6 +532,7 @@ def add_xp(guild_id, user_id, amount, reason, db=None):
 intents = discord.Intents.default()
 intents.members = True  # Enable Server Members Intent in the Discord Developer Portal
 intents.message_content = True  # Enable Message Content Intent for quest tracking
+# Discord bot class: registers persistent views in setup_hook so old buttons work after restarts.
 class Guildkeeper(commands.Bot):
     async def setup_hook(self):
         guild = discord.Object(id=GUILD_ID)
@@ -392,6 +541,10 @@ class Guildkeeper(commands.Bot):
         self.add_view(StarterTurnInView())
         self.add_view(WeeklyTurnInView())
         self.add_view(PlayerStatsView())
+        self.add_view(admin_hub.AdminHubView())
+        self.add_view(message_scheduler_panel.SchedulerDashboard())
+        self.add_view(testing_cheats.TestingCheatsView())
+        self.add_view(shopify_discord.ShopHub())
         self.add_view(MilestoneBoardView())
         self.add_view(RewardTicketAdminView())
         # Register outstanding review buttons after restarts.
@@ -429,7 +582,7 @@ async def announce_new_guild_member(member: discord.Member) -> None:
     embed.set_thumbnail(url=member.display_avatar.url)
     try:
         await channel.send(
-            content=f'🎉 Congratulations {member.mention} — **Novice**!',
+            content=f'🎉 Congratulations {member.mention}  -  **Novice**!',
             embed=embed,
             allowed_mentions=discord.AllowedMentions(users=[member], roles=False, everyone=False),
         )
@@ -469,7 +622,7 @@ async def announce_level_up(member: discord.Member, old_rank: str, new_rank: str
     embed.set_thumbnail(url=member.display_avatar.url)
     try:
         await channel.send(
-            content=f'🎉 Congratulations {member.mention} — **{new_rank}**!',
+            content=f'🎉 Congratulations {member.mention}  -  **{new_rank}**!',
             embed=embed,
             allowed_mentions=discord.AllowedMentions(users=[member], roles=False, everyone=False),
         )
@@ -516,6 +669,7 @@ def record_highest_rank(gid: int, uid: int, current: str, previous: str | None) 
     return bool(record_new_rank_milestones(gid, uid, current, previous))
 
 
+# Synchronize XP rank roles on the Discord member, and optionally announce promotions.
 async def update_rank(member: discord.Member, xp: int, announce: bool = True) -> bool:
     """Sync rank roles and celebrate only new personal-best ranks, never repeats."""
     desired = rank_for(xp, member.guild.id, member.id)
@@ -552,12 +706,18 @@ async def update_rank(member: discord.Member, xp: int, announce: bool = True) ->
     except sqlite3.Error:
         log.exception('Could not record highest rank for member %s', member.id)
         return True
+    if new_milestones:
+        with connect() as db:
+            for _, to_rank in new_milestones:
+                record_notification(db,member.guild.id,member.id,'rank',
+                                    'Rank Unlocked',f'You unlocked {to_rank}!',f'rank:{to_rank}')
     if announce:
         for from_rank, to_rank in new_milestones:
             await announce_level_up(member, from_rank, to_rank, xp)
     return True
 
 
+# On startup/admin request, reconcile Discord roles with saved XP and rank unlocks.
 async def sync_all_ranks(guild: discord.Guild) -> tuple[int, int]:
     """Fetch all members, including those not yet cached, and reconcile ranks."""
     updated = failed = 0
@@ -587,6 +747,7 @@ SPAWNPOINT_GREETINGS = (
 )
 
 
+# Welcome new arrivals in the server; this is separate from a user's direct messages.
 async def send_spawnpoint_welcome(member: discord.Member):
     """Post one public welcome embed, mentioning the joining member."""
     if not SPAWNPOINT_CHANNEL_ID:
@@ -673,6 +834,7 @@ async def send_guildkeeper_welcome_dm(member: discord.Member) -> bool:
 
 
 @bot.event
+# React to a new Guild member and kick off their onboarding.
 async def on_member_join(member: discord.Member):
     if member.guild.id == GUILD_ID and not member.bot:
         await send_spawnpoint_welcome(member)
@@ -696,7 +858,7 @@ def command_directory_lines(admin_only: bool) -> list[str]:
             continue
         description = command.description or 'No description provided.'
         commands_found.append((command.name, description))
-    return [f'**/{name}** — {description}' for name, description in sorted(commands_found)]
+    return [f'**/{name}**  -  {description}' for name, description in sorted(commands_found)]
 
 
 async def send_command_directory(interaction: discord.Interaction, admin_only: bool):
@@ -709,7 +871,7 @@ async def send_command_directory(interaction: discord.Interaction, admin_only: b
             continue
         commands_found.append((command.name, command.description or 'No description provided.'))
     commands_found.sort(key=lambda item: item[0])
-    title = '✦ GUILDKEEPER — ADMIN COMMANDS' if admin_only else '✦ GUILDKEEPER — MEMBER COMMANDS'
+    title = '✦ GUILDKEEPER  -  ADMIN COMMANDS' if admin_only else '✦ GUILDKEEPER  -  MEMBER COMMANDS'
     intro = ('Commands for Guild moderators and administrators.' if admin_only
              else 'Commands available to Guild members.')
     embeds = []
@@ -752,6 +914,7 @@ async def admin_sync_ranks(interaction: discord.Interaction):
         await interaction.followup.send('Rank sync failed. Check the bot log and Server Members Intent.', ephemeral=True)
 
 
+# Small helper that replies to slash commands privately unless told otherwise.
 async def reply(interaction: discord.Interaction, content: str, ephemeral=True):
     await interaction.response.send_message(content, ephemeral=ephemeral)
 
@@ -768,11 +931,32 @@ async def profile(interaction: discord.Interaction):
     streak_notice = streak_blocked_rank_notice(interaction.guild_id, interaction.user.id, xp)
     await reply(interaction, f'✦ **{interaction.user.display_name}**\nRank: **{rank_for(xp, interaction.guild_id, interaction.user.id)}**\nXP: **{xp}**\nLifetime objectives completed: **{lifetime_objectives(interaction.guild_id, interaction.user.id)}**\nLongest streak: **{longest_streak(interaction.guild_id, interaction.user.id)} weeks**\n\n**Rewards**\n{reward_eligibility_text(interaction.guild_id, interaction.user.id)}\n{upcoming}' + ('\n\n' + streak_notice if streak_notice else '') + '\n\n🎟️ To request an unlocked rank reward, visit **#stats-and-streaks** and press **Claim Reward** in the Player Hub.')
 
+class RankProfileButtonView(discord.ui.View):
+    """Owner-only shortcut from /ranks to the member's live profile."""
+    def __init__(self, user_id: int):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message('This rank panel belongs to another member.', ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='View Rank', emoji='👤', style=discord.ButtonStyle.primary)
+    async def view_rank(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not only_guild(interaction):
+            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
+        await interaction.response.send_message(
+            profile_progress_text(interaction.guild_id, interaction.user.id, interaction.user.display_name),
+            ephemeral=True)
+
+
 @bot.tree.command(name='ranks', description='See Guild XP milestones')
 async def ranks(interaction: discord.Interaction):
     xp = get_xp(interaction.guild_id, interaction.user.id)
     streak_notice = streak_blocked_rank_notice(interaction.guild_id, interaction.user.id, xp)
-    await reply(interaction, '**GYMGUILD RANKS**\n'+'\n'.join(f'✦ **{name}** — {threshold:,} XP' + (f' + {STREAK_REQUIREMENTS[name]}-week **active** streak to unlock' if name in STREAK_REQUIREMENTS else '') for name,threshold in RANKS) + '\n\n**Rank rules:** Streaks must be active when unlocking Master, Legend or Paragon. Once unlocked, breaking your streak will not demote you; losing XP below a rank threshold can. Regaining XP restores previously unlocked ranks without repeating the streak.\n**Rewards:** Master (10%), Legend (15%) and Paragon (20%) are unlocked permanently when their rank requirements are first met. Each reward can be claimed **once**, even after an XP demotion. Paused weeks preserve streaks but do not increase them.' + ('\n\n' + streak_notice if streak_notice else ''))
+    await interaction.response.send_message( '**GYMGUILD RANKS**\n'+'\n'.join(f'✦ **{name}**  -  {threshold:,} XP' + (f' + {STREAK_REQUIREMENTS[name]}-week **active** streak to unlock' if name in STREAK_REQUIREMENTS else '') for name,threshold in RANKS) + '\n\n**Rank rules:** Streaks must be active when unlocking Master, Legend or Paragon. Once unlocked, breaking your streak will not demote you; losing XP below a rank threshold can. Regaining XP restores previously unlocked ranks without repeating the streak.\n**Rewards:** Master (10%), Legend (15%) and Paragon (20%) are unlocked permanently when their rank requirements are first met. Each reward can be claimed **once**, even after an XP demotion. Paused weeks preserve streaks but do not increase them.' + ('\n\n' + streak_notice if streak_notice else ''), view=RankProfileButtonView(interaction.user.id), ephemeral=True)
 
 
 
@@ -817,7 +1001,7 @@ async def admin_quest_create(interaction: discord.Interaction, title: str, descr
     await reply(interaction, f'📜 Quest **#{qid}: {title}** created! Members can use `/quests` and `/quest_progress`.')
     channel = bot.get_channel(QUESTS_CHANNEL_ID)
     if isinstance(channel,discord.TextChannel) and channel.guild.id==interaction.guild_id:
-        await channel.send(f'📜 **NEW GUILD QUEST — #{qid}: {discord.utils.escape_markdown(title)}**\n{discord.utils.escape_mentions(description)}\nReward: **{reward} XP**\nUse `/quest_progress quest_id:{qid}` to begin.', allowed_mentions=discord.AllowedMentions.none())
+        await channel.send(f'📜 **NEW GUILD QUEST  -  #{qid}: {discord.utils.escape_markdown(title)}**\n{discord.utils.escape_mentions(description)}\nReward: **{reward} XP**\nUse `/quest_progress quest_id:{qid}` to begin.', allowed_mentions=discord.AllowedMentions.none())
 
 @bot.tree.command(name='admin_streak_add', description='Moderator: credit consecutive streak weeks to a member (no XP awarded)')
 @app_commands.default_permissions(manage_guild=True)
@@ -848,6 +1032,7 @@ async def admin_streak_add(interaction: discord.Interaction, member: discord.Mem
            if milestones else 'No new streak milestone rewards were due.'),
         ephemeral=True)
 
+# Reset rank-specific test state only, rather than wiping a member's whole account.
 def reset_rank_test_data(gid: int, uid: int) -> int:
     """Reset the member's rank testing progress to permanent Novice.
 
@@ -967,24 +1152,29 @@ async def admin_xp_remove(interaction: discord.Interaction, member: discord.Memb
     await reply(interaction,f'✦ Removed **{amount} XP** from {member.mention}. New total: **{xp}**.')
 
 # Quest weeks begin Monday 00:00 Europe/London (GMT/BST automatically).
+# Use Monday midnight in the UK timezone as the start of a quest week.
 def week_start(dt=None):
     local = (dt or utc_now()).astimezone(TZ)
     monday = local.date() - timedelta(days=local.weekday())
     return datetime.combine(monday, datetime.min.time(), TZ)
 
 
+# Create a stable YYYY-MM-DD identifier for all records in the same quest week.
 def week_key(dt=None):
     return week_start(dt).date().isoformat()
 
 
+# Find the next Monday midnight for Discord countdowns and reminders.
 def next_reset(dt=None):
     return datetime.combine(week_start(dt).date() + timedelta(days=7), datetime.min.time(), TZ)
 
 
+# Use UK-local dates so the two training objectives require separate calendar days.
 def cycle_day(dt=None):
     return (dt or utc_now()).astimezone(TZ).date().isoformat()
 
 
+# Check whether the player has a pause for the current week that was not resumed.
 def is_paused(gid, uid, wk):
     with connect() as db:
         return bool(db.execute('''SELECT 1 FROM pauses p WHERE p.guild_id=? AND p.user_id=? AND p.week_key=?
@@ -992,6 +1182,7 @@ def is_paused(gid, uid, wk):
             AND r.user_id=p.user_id AND r.week_key=p.week_key)''', (gid,uid,wk)).fetchone())
 
 
+# Return which of the four weekly objectives this player has completed.
 def weekly_status(gid, uid, wk):
     with connect() as db:
         kinds = {r['kind'] for r in db.execute('SELECT kind FROM weekly_actions WHERE guild_id=? AND user_id=? AND week_key=?',(gid,uid,wk))}
@@ -1014,6 +1205,7 @@ MILESTONE_EMOJI = {
 MILESTONE_COMPLETION_BONUS = 500
 
 
+# Collect the one-time milestone claims needed for the Guild quest overview.
 def milestone_progress(gid: int, uid: int) -> dict:
     with connect() as db:
         claimed = {r['kind'] for r in db.execute(
@@ -1038,7 +1230,7 @@ def milestone_quests_embed(gid: int, uid: int) -> discord.Embed:
     progress = milestone_progress(gid, uid)
     orders = purchase_order_summary(gid, uid)
     embed = discord.Embed(
-        title='✦ GYMGUILD — MILESTONE QUESTS ✦',
+        title='✦ GYMGUILD  -  MILESTONE QUESTS ✦',
         description=(
             f'**Completed: {progress["completed"]}/{progress["total"]}** permanent milestones\n'
             f'Complete them all to receive a one-time **+{MILESTONE_COMPLETION_BONUS} XP** Main Quest Completion bonus! '
@@ -1059,20 +1251,22 @@ def milestone_quests_embed(gid: int, uid: int) -> discord.Embed:
                       if orders['pending'] else
                       f' ({orders["approved"]} approved orders)')
         embed.add_field(
-            name=f'{"✅" if achieved else "⬜"} {MILESTONE_EMOJI[kind]} {label} — {xp} XP',
+            name=f'{"✅" if achieved else "⬜"} {MILESTONE_EMOJI[kind]} {label}  -  {xp} XP',
             value=description + detail + '\n\u200b',
             inline=False,
         )
     embed.add_field(
-        name='🏆 Main Quest Completion — +500 XP',
+        name='🏆 Main Quest Completion  -  +500 XP',
         value='✅ Claimed permanently!' if progress['bonus_earned']
               else f'🔒 {progress["completed"]}/{progress["total"]} milestones completed',
         inline=False,
     )
+    embed.add_field(name='⏸️ Weekly XP Pause Status', value=quest_pause_notice(gid, uid), inline=False)
     embed.set_footer(text='Submit orders through the main Milestone Quests board.')
     return embed
 
 
+# Grant the overall milestone completion bonus exactly once when every requirement is met.
 def award_guild_completion_if_ready(db, gid: int, uid: int) -> bool:
     """Grant the six-milestone completion reward once, in the existing transaction."""
     kinds = {row['kind'] for row in db.execute(
@@ -1087,6 +1281,7 @@ def award_guild_completion_if_ready(db, gid: int, uid: int) -> bool:
     return False
 
 
+# The idempotent reward helper: insert one claim and award XP only if it was not already claimed.
 def grant_once(db, table, gid, uid, kind, amount):
     cur = db.execute(f'INSERT OR IGNORE INTO {table}(guild_id,user_id,kind,claimed_at) VALUES (?,?,?,?)',
                      (gid,uid,kind,utc_now().isoformat()))
@@ -1098,6 +1293,7 @@ def grant_once(db, table, gid, uid, kind, amount):
     return False
 
 
+# Admin-only ability to reverse selected milestone test claims and their XP.
 def reset_milestone_test_data(gid: int, uid: int, target: str) -> dict:
     """Undo this member's current test milestone rewards without touching others.
 
@@ -1434,6 +1630,7 @@ async def admin_milestones_complete(interaction: discord.Interaction, confirm: b
         ephemeral=True)
 
 
+# Calculate a member's historical best streak, independent of current activity.
 def longest_streak(gid: int, uid: int) -> int:
     """Longest run of completed weeks, including admin credits; pauses preserve runs."""
     completed, paused = streak_weeks(gid, uid)
@@ -1460,6 +1657,7 @@ STREAK_MILESTONE_THRESHOLDS = (
 )
 
 
+# Check whether streak thresholds unlock additional one-time milestone XP.
 def award_earned_streak_milestones(gid: int, uid: int) -> list[str]:
     """Recognize consecutive credited or completed weeks, exactly once.
 
@@ -1479,6 +1677,7 @@ def award_earned_streak_milestones(gid: int, uid: int) -> list[str]:
     return awarded
 
 
+# On startup, recover earned streak milestones that older bot versions may have missed.
 def backfill_earned_streak_milestones(gid: int) -> int:
     """Repair earlier admin streak credits without touching member records."""
     with connect() as db:
@@ -1507,9 +1706,9 @@ def reward_eligibility_text(gid: int, uid: int) -> str:
         if rank in requests:
             status = 'Already requested (' + requests[rank] + ')'
         elif rank in unlocked:
-            status = 'Eligible — unclaimed'
+            status = 'Eligible  -  unclaimed'
         else:
-            status = 'Locked — requires ' + str(STREAK_REQUIREMENTS[rank]) + '-week active streak and ' + str(dict(RANKS)[rank]) + ' XP'
+            status = 'Locked  -  requires ' + str(STREAK_REQUIREMENTS[rank]) + '-week active streak and ' + str(dict(RANKS)[rank]) + ' XP'
         lines.append(f'• **{rank} ({discount}% off):** {status}')
     return '\n'.join(lines)
 
@@ -1528,6 +1727,7 @@ def streak_length(gid, uid):
     return count
 
 
+# Award a qualifying Discord post only once, recording its day, kind and fingerprint.
 async def credit_action(message, kind, xp, fingerprint):
     gid,uid = message.guild.id,message.author.id
     wk = week_key(message.created_at)
@@ -1577,6 +1777,7 @@ async def credit_action(message, kind, xp, fingerprint):
 
 
 @bot.event
+# Classify real member posts as qualifying training/gym/hobby objectives and apply checks.
 async def on_message(message: discord.Message):
     if not message.guild or message.guild.id != GUILD_ID or message.author.bot or not isinstance(message.author,discord.Member):
         return
@@ -1602,6 +1803,7 @@ async def on_message(message: discord.Message):
         await credit_action(message,'hobby',25,fingerprint)
 
 
+# Only penalise a week when the player genuinely completed no qualifying objectives.
 def week_needs_inactivity_penalty(db, gid: int, uid: int, wk: str) -> bool:
     """A week is inactive only if NONE of its four objectives was recorded."""
     paused = db.execute(
@@ -1619,6 +1821,7 @@ def week_needs_inactivity_penalty(db, gid: int, uid: int, wk: str) -> bool:
     ).fetchone() is None
 
 
+# Finalize past weeks after a Monday reset, considering pauses and inactivity penalties.
 async def settle_previous_weeks():
     guild = bot.get_guild(GUILD_ID)
     if guild is None:
@@ -1642,6 +1845,22 @@ async def settle_previous_weeks():
                 db.execute('BEGIN IMMEDIATE')
                 inserted = db.execute('INSERT OR IGNORE INTO weekly_settlements VALUES (?,?,?,?)',(GUILD_ID,uid,wk,utc_now().isoformat()))
                 if inserted.rowcount:
+                    paused = db.execute(
+                        'SELECT 1 FROM pauses p WHERE p.guild_id=? AND p.user_id=? AND p.week_key=? '
+                        'AND NOT EXISTS (SELECT 1 FROM resumed_pauses r '
+                        'WHERE r.guild_id=p.guild_id AND r.user_id=p.user_id AND r.week_key=p.week_key)',
+                        (GUILD_ID,uid,wk)).fetchone()
+                    complete = db.execute(
+                        'SELECT 1 FROM weekly_completions WHERE guild_id=? AND user_id=? AND week_key=?',
+                        (GUILD_ID,uid,wk)).fetchone()
+                    previous = (cursor-timedelta(days=7)).date().isoformat()
+                    had_streak = db.execute(
+                        'SELECT 1 FROM weekly_completions WHERE guild_id=? AND user_id=? AND week_key=?',
+                        (GUILD_ID,uid,previous)).fetchone()
+                    if had_streak and not complete and not paused:
+                        record_notification(db,GUILD_ID,uid,'streak','Streak Lost',
+                                            f'Your streak ended after the week of {wk}. '
+                                            'Complete the next quest to rebuild it.',f'streak-lost:{wk}')
                     if week_needs_inactivity_penalty(db, GUILD_ID, uid, wk):
                         add_xp(GUILD_ID,uid,-25,'Inactive week '+wk,db)
                         changed = True
@@ -1655,17 +1874,19 @@ async def settle_previous_weeks():
 
 
 WEEKLY_OBJECTIVES = (
-    ('training1', '⚔️ First Flame — 50 XP'),
-    ('training2', '🏃 Fuel the Fire — 50 XP'),
-    ('gym', '🏋️ Flex Text — 25 XP'),
-    ('hobby', '🎮 Skill Share — 25 XP'),
+    ('training1', '⚔️ First Flame  -  50 XP'),
+    ('training2', '🏃 Fuel the Fire  -  50 XP'),
+    ('gym', '🏋️ Flex Text  -  25 XP'),
+    ('hobby', '🎮 Skill Share  -  25 XP'),
 )
 
 
+# Show the streak including the current week when all objectives are completed.
 def weekly_streak_with_current(gid, uid, wk):
     return active_streak(gid, uid)
 
 
+# Persistent Weekly Quest buttons for checking or turning in progress.
 class WeeklyTurnInView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -1713,6 +1934,25 @@ class WeeklyTurnInView(discord.ui.View):
             ephemeral=True)
 
 
+# Explain whether a pause is blocking rewards in the current week.
+def quest_pause_notice(gid: int, uid: int) -> str:
+    """Weekly quest XP status; milestone and Starter rewards are independent."""
+    wk = week_key()
+    if is_paused(gid, uid, wk):
+        return ('⏸️ **Pause ACTIVE  -  no Weekly Side Quest XP is earned while paused.** '
+                'Your streak is protected. Use **Pauses** in the Player Hub to resume '
+                'weekly XP; resuming does **not refund** the pause.')
+    with connect() as db:
+        used_this_week = db.execute(
+            'SELECT 1 FROM pauses WHERE guild_id=? AND user_id=? AND week_key=?',
+            (gid, uid, wk)).fetchone() is not None
+    if used_this_week:
+        return ('▶️ **No active pause  -  weekly XP earning has resumed.** '
+                'Your pause was used and cannot be refunded.')
+    return '✅ **No active pause  -  weekly quest XP earning is enabled.**'
+
+
+# Translate four saved objective flags into a readable member-facing progress panel.
 def weekly_progress_text(gid: int, uid: int) -> str:
     kinds = weekly_status(gid, uid, week_key())
     lines = [f'{"✅" if key in kinds else "⬜"} {name}' for key, name in WEEKLY_OBJECTIVES]
@@ -1720,7 +1960,7 @@ def weekly_progress_text(gid: int, uid: int) -> str:
     return ('⚔️ **Your Weekly Side Quest**\n' + '\n'.join(lines) +
             f'\n**{len(kinds)}/4 objectives completed.**\n' +
             ('🏆 **Automatically turned in!** Your completed week counts toward your streak.'
-             if complete else 'Complete all four to turn in automatically — no button required.'))
+             if complete else 'Complete all four to turn in automatically  -  no button required.') + '\n\n' + quest_pause_notice(gid, uid))
 
 
 @bot.tree.command(name='weekly_progress',description='See your four weekly quest objectives')
@@ -1761,6 +2001,7 @@ async def streak(interaction:discord.Interaction):
 
 STARTER_REWARDS = {'intro': 10, 'class': 10, 'hobby': 10, 'welcome': 10, 'first_steps': 10}
 
+# Build the one-time Starter Quest instructions and available rewards.
 def starter_embed(member=None):
     embed = discord.Embed(
         title='🛡️ GYMGUILD ✦ STARTER QUEST',
@@ -1772,26 +2013,27 @@ def starter_embed(member=None):
     side_quest = f'<#{SIDE_QUEST_CHANNEL_ID}>' if SIDE_QUEST_CHANNEL_ID else '#side-quest'
     msg_link = (f'https://discord.com/channels/{GUILD_ID}/{WELCOME_CHANNEL_ID}/{WELCOME_MESSAGE_ID}'
                 if WELCOME_CHANNEL_ID and WELCOME_MESSAGE_ID else None)
-    embed.add_field(name='📜 1 · Guild Info — 10 XP',
+    embed.add_field(name='📜 1 · Guild Info  -  10 XP',
                     value=(f'React with any emoji to [this message]({msg_link}) in {welcome}.' if msg_link
                            else f'React with any emoji to the designated message in {welcome}.'), inline=False)
     embed.add_field(name='\u200b', value='\u200b', inline=False)
-    embed.add_field(name='🏋️ 2 · Choose Your Class — 10 XP',
+    embed.add_field(name='🏋️ 2 · Choose Your Class  -  10 XP',
                     value=f'Choose Warrior, Ranger, Mage or Paladin. This can be done in {get_role}.', inline=False)
     embed.add_field(name='\u200b', value='\u200b', inline=False)
-    embed.add_field(name='🎮 3 · Choose Your Proficiency — 10 XP',
+    embed.add_field(name='🎮 3 · Choose Your Proficiency  -  10 XP',
                     value=f'Choose at least one Proficiency. This can be done in {get_role}.', inline=False)
     embed.add_field(name='\u200b', value='\u200b', inline=False)
-    embed.add_field(name='👋 4 · Introduce Yourself — 10 XP',
+    embed.add_field(name='👋 4 · Introduce Yourself  -  10 XP',
                     value=f'Say hello in {intro} (at least 25 characters and 5 words).', inline=False)
     embed.add_field(name='\u200b', value='\u200b', inline=False)
-    embed.add_field(name='👟 5 · First Steps — 10 XP',
+    embed.add_field(name='👟 5 · First Steps  -  10 XP',
                     value=f'Complete any 1 of the 4 Weekly Side Quest objectives in {side_quest}.', inline=False)
     embed.add_field(name='━━━━━━━━━━━━━━━━━━━━', value='​', inline=False)
     embed.add_field(name='Total starter reward', value='**50 XP**', inline=False)
     embed.set_footer(text='Guildkeeper Starter Quest · Complete 5/5, then Turn In Quest · /starter_progress')
     return embed
 
+# Record a Starter objective; repeated clicks should not award its XP twice.
 async def award_starter(member, kind):
     if member.bot or member.guild.id != GUILD_ID or kind not in STARTER_REWARDS:
         return False
@@ -1850,6 +2092,7 @@ class GuildBlastWelcomeView(discord.ui.View):
             content='No problem! Guild Blast is optional. You can enable or disable it anytime in #player-stats.', view=None)
 
 
+# Public Starter Quest button; when complete, grant access to the other Guild channels.
 class StarterTurnInView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -1911,6 +2154,7 @@ class StarterTurnInView(discord.ui.View):
 
 
 @bot.event
+# React to member-role changes needed for role menus or server boost detection.
 async def on_member_update(before:discord.Member,after:discord.Member):
     if after.guild.id != GUILD_ID or after.bot:
         return
@@ -1984,6 +2228,7 @@ def role_menu_lookup(message_id: int, channel_id: int):
     return row['menu_type'] if row else None
 
 
+# Translate emoji reactions into one selected Class or Proficiency role.
 async def process_role_reaction(payload: discord.RawReactionActionEvent, adding: bool):
     if payload.guild_id != GUILD_ID or bot.user is None or payload.user_id == bot.user.id:
         return
@@ -2076,6 +2321,7 @@ async def admin_role_menus(interaction: discord.Interaction):
     await interaction.followup.send('Class and Proficiency menus published in ' + channel.mention + ': ' + ' · '.join(urls), ephemeral=True)
 
 
+# Post or replace reaction menus while saving their channel/message IDs.
 async def publish_role_menu(guild: discord.Guild, channel: discord.TextChannel, kind: str, mapping: dict[str, int]) -> str:
     """Post one self-service menu; only configured non-rank roles can be offered."""
     if not mapping or any(
@@ -2090,7 +2336,7 @@ async def publish_role_menu(guild: discord.Guild, channel: discord.TextChannel, 
     heading = '⚔️ CHOOSE YOUR CLASS' if kind == 'gym' else '🔮 CHOOSE YOUR PROFICIENCY'
     desc = ('React to choose your training class. Selecting a different class replaces the previous one.'
             if kind == 'gym' else 'React to select as many proficiencies as you like. Remove a reaction to unselect.')
-    lines = [f'{emoji} — <@&{role_id}>' for emoji, role_id in mapping.items()]
+    lines = [f'{emoji}  -  <@&{role_id}>' for emoji, role_id in mapping.items()]
     embed = discord.Embed(title=heading, description=desc + '\n\n' + '\n\n'.join(lines), color=0x71A7A2)
     embed.set_footer(text='Class & Proficiency roles only · XP ranks are earned automatically')
     msg = await channel.send(embed=embed)
@@ -2143,15 +2389,16 @@ async def admin_proficiency_menu(interaction: discord.Interaction):
     await publish_single_role_menu(interaction, 'hobby')
 
 
+# Show how many of the five onboarding objectives are already complete.
 def starter_progress_text(gid: int, uid: int) -> str:
     with connect() as db:
         claimed = {r['kind'] for r in db.execute(
             'SELECT kind FROM starter_claims WHERE guild_id=? AND user_id=?', (gid, uid))}
     labels = [('welcome', 'Guild Info'), ('class', 'Class'), ('hobby', 'Proficiency'),
               ('intro', 'Introduction'), ('first_steps', 'First Steps')]
-    lines = [f'{"✅" if key in claimed else "⬜"} {label} — {STARTER_REWARDS[key]} XP'
+    lines = [f'{"✅" if key in claimed else "⬜"} {label}  -  {STARTER_REWARDS[key]} XP'
              for key, label in labels]
-    return '🛡️ **Your Starter Quest**\n' + '\n'.join(lines) + f'\n**{len(set(STARTER_REWARDS) & claimed)}/5 objectives completed.**'
+    return '🛡️ **Your Starter Quest**\n' + '\n'.join(lines) + f'\n**{len(set(STARTER_REWARDS) & claimed)}/5 objectives completed.**' + '\n\n' + quest_pause_notice(gid, uid)
 
 
 @bot.tree.command(name='starter_progress',description='See your one-time Starter Quest progress')
@@ -2281,7 +2528,7 @@ def purchase_order_summary(gid: int, uid: int) -> dict:
 def order_xp_embed(gid: int, uid: int) -> discord.Embed:
     summary = purchase_order_summary(gid, uid)
     embed = discord.Embed(
-        title='✦ GYMGUILD — ORDER XP',
+        title='✦ GYMGUILD  -  ORDER XP',
         description=('Submit your GYMGUILD Shopify order number for moderator review. '
                      f'Your **first approved order** can earn **{MILESTONE_XP["purchase1"]} XP** '
                      'when approved. Rejected or cancelled requests can be retried until approved.'),
@@ -2307,14 +2554,14 @@ def order_xp_embed(gid: int, uid: int) -> discord.Embed:
         status_icons = {'approved': '✅', 'pending': '⏳', 'rejected': '❌', 'cancelled': '🚫', 'test_reset': '🧪'}
         lines = [
             f"{status_icons.get(order['status'], '•')} "
-            f"`{discord.utils.escape_markdown(order['order_reference'])}` — "
+            f"`{discord.utils.escape_markdown(order['order_reference'])}`  -  "
             f"{order['status'].title()}"
             for order in summary['orders']
         ]
         embed.add_field(name='Your submitted orders (latest 8)', value='\n'.join(lines), inline=False)
     else:
         embed.add_field(name='Your submitted orders', value='No orders submitted yet.', inline=False)
-    embed.set_footer(text='Only GuildKeeper submissions are counted — not all Shopify orders.')
+    embed.set_footer(text='Only GuildKeeper submissions are counted  -  not all Shopify orders.')
     return embed
 
 
@@ -2335,6 +2582,7 @@ def order_submission_status(gid: int, uid: int) -> str:
     return 'available'
 
 
+# Save a member-submitted Shopify reference as pending, never as instant verified XP.
 def submit_purchase_order(gid: int, uid: int, reference: str) -> tuple[str, int | None]:
     """One open request per member. Rejected/cancelled requests can be retried.
 
@@ -2419,6 +2667,7 @@ def submit_first_purchase_milestone(gid: int, uid: int, reference: str) -> str:
     return 'awarded' if status == 'approved' else status
 
 
+# Only the moderator review decision can turn a pending order into one-time milestone XP.
 def review_purchase_order(gid: int, order_id: int, approver_id: int, approve: bool) -> tuple[str, int | None]:
     """Resolve an individual pending order transactionally; only the first grants XP."""
     with connect() as db:
@@ -2453,6 +2702,7 @@ def review_first_purchase_milestone(gid: int, uid: int, approve: bool) -> str:
     return 'already_awarded' if result == 'approved_no_xp' else result
 
 
+# Post a private moderator review card for a purchase milestone request.
 async def post_purchase_review(guild: discord.Guild, user_id: int, order_id: int) -> bool:
     channel = guild.get_channel(MOD_REVIEW_CHANNEL_ID) if MOD_REVIEW_CHANNEL_ID else None
     if not isinstance(channel, discord.TextChannel):
@@ -2463,15 +2713,24 @@ async def post_purchase_review(guild: discord.Guild, user_id: int, order_id: int
             'SELECT order_reference FROM purchase_orders WHERE guild_id=? AND id=?',
             (guild.id, order_id),
         ).fetchone()
+        # Verify flags are read-only; an actual moderator must still approve XP.
+        shopify_checked = db.execute(
+            'SELECT verified_at FROM shopify_order_verifications '
+            'WHERE guild_id=? AND purchase_id=?',
+            (guild.id, order_id),
+        ).fetchone() if shopify_client.admin_configured() else None
     if row is None:
         return False
     reference = discord.utils.escape_mentions(
         discord.utils.escape_markdown(row['order_reference']))
     embed = discord.Embed(
-        title='🛍️ ORDER XP — REVIEW REQUIRED',
+        title='🛍️ ORDER XP  -  REVIEW REQUIRED',
         description=(f'Member: <@{user_id}>\nOrder reference: **{reference}**\n'
-                     'Check this order in Shopify before approving.\n'
-                     f'**First approved order: +{MILESTONE_XP["purchase1"]} XP. Subsequent orders: +0 XP.**'),
+                     + ('✅ Shopify API checked: paid, uncancelled; supplied email matches. '
+                        'Still confirm ownership before approving.\n'
+                        if shopify_checked else '⚠️ Not Shopify-verified by GuildKeeper. '
+                        'Check the order in Shopify before approval.\n')
+                     + f'**First approved order: +{MILESTONE_XP["purchase1"]} XP. Subsequent orders: +0 XP.**'),
         colour=discord.Colour.from_rgb(104, 163, 153),
     )
     try:
@@ -2491,6 +2750,7 @@ async def post_purchase_review(guild: discord.Guild, user_id: int, order_id: int
     return True
 
 
+# Translate order submission results into a private Discord response.
 async def submit_order_from_interaction(interaction: discord.Interaction, reference: str) -> None:
     if interaction.guild_id != GUILD_ID or not isinstance(interaction.user, discord.Member):
         return await interaction.response.send_message('Use this in the GYMGUILD server.', ephemeral=True)
@@ -2504,7 +2764,7 @@ async def submit_order_from_interaction(interaction: discord.Interaction, refere
     elif status == 'pending':
         message = '⏳ Your Order XP request is pending. Cancel it from the private status panel to submit another.'
     elif status == 'approved':
-        message = '✅ Order XP granted — milestone objective complete.'
+        message = '✅ Order XP granted  -  milestone objective complete.'
     elif status == 'rejected':
         message = '❌ Your request was rejected. You may submit a new order number.'
     elif status == 'used_reference':
@@ -2522,7 +2782,7 @@ async def submit_order_from_interaction(interaction: discord.Interaction, refere
 
 def milestone_board_embed() -> discord.Embed:
     embed = discord.Embed(
-        title='✦ GYMGUILD — MILESTONE QUESTS ✦',
+        title='✦ GYMGUILD  -  MILESTONE QUESTS ✦',
         description=(
             'Complete special Guild achievements to earn permanent one-time XP rewards. '
             'Select **My Progress** to view what you have unlocked privately, '
@@ -2533,7 +2793,7 @@ def milestone_board_embed() -> discord.Embed:
     )
     for kind, name, xp, description in MILESTONE_QUESTS:
         embed.add_field(
-            name=f'{MILESTONE_EMOJI[kind]} {name} — {xp} XP',
+            name=f'{MILESTONE_EMOJI[kind]} {name}  -  {xp} XP',
             value=description + '\n\u200b',
             inline=False,
         )
@@ -2558,7 +2818,7 @@ def boost_milestone_message(gid: int, uid: int, currently_boosting: bool) -> str
             ).fetchone()
         amount = f'{total["amount"]} XP granted' if total else 'XP reward claimed'
         return (
-            f'💎 **Boost milestone complete — {amount}!** '
+            f'💎 **Boost milestone complete  -  {amount}!** '
             'Thank you for supporting GYMGUILD and helping our community grow. ✦'
         )
     if currently_boosting:
@@ -2579,6 +2839,7 @@ def boost_milestone_message(gid: int, uid: int, currently_boosting: bool) -> str
     )
 
 
+# Permanent Milestone Quest entry-point buttons for members.
 class MilestoneBoardView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -2689,6 +2950,7 @@ class MilestoneQuestsView(discord.ui.View):
         )
 
 
+# Collect a purchase reference for moderation; no payment occurs through Discord.
 async def open_order_submission(interaction: discord.Interaction) -> None:
     """Show the order modal only before a member makes their lifetime request."""
     if interaction.guild_id != GUILD_ID or not isinstance(interaction.user, discord.Member):
@@ -2697,7 +2959,7 @@ async def open_order_submission(interaction: discord.Interaction) -> None:
     status = order_submission_status(interaction.guild_id, interaction.user.id)
     if status == 'approved':
         return await interaction.response.send_message(
-            '✅ **Order XP granted — milestone objective complete.**',
+            '✅ **Order XP granted  -  milestone objective complete.**',
             ephemeral=True,
         )
     if status == 'pending':
@@ -2757,7 +3019,7 @@ class OrderXPView(discord.ui.View):
             notice = ('🚫 **Order XP request cancelled.** No XP awarded. '
                       'You can submit a replacement through the public Milestone Quests panel.')
         elif result == 'approved':
-            notice = '✅ Order XP granted — milestone objective complete. Approved orders cannot be cancelled.'
+            notice = '✅ Order XP granted  -  milestone objective complete. Approved orders cannot be cancelled.'
         else:
             notice = 'There is no pending Order XP request to cancel.'
         self.update_controls(interaction.guild_id)
@@ -2778,7 +3040,7 @@ async def mark_cancelled_mod_review(guild, channel_id, message_id, order_id):
         msg = await channel.fetch_message(message_id)
         embed = msg.embeds[0].copy() if msg.embeds else None
         if embed:
-            embed.add_field(name='Decision', value='🚫 Cancelled by member — no XP awarded.', inline=False)
+            embed.add_field(name='Decision', value='🚫 Cancelled by member  -  no XP awarded.', inline=False)
         await msg.edit(embed=embed, view=None)
     except (discord.NotFound, discord.Forbidden, discord.HTTPException):
         log.warning('Could not retire cancelled order review card %s', order_id)
@@ -2865,7 +3127,7 @@ async def admin_milestone_pending(interaction: discord.Interaction):
     if not rows:
         return await interaction.response.send_message('✅ No pending orders.', ephemeral=True)
     lines = [
-        f'<@{row["user_id"]}> — `{discord.utils.escape_markdown(row["order_reference"])}` '
+        f'<@{row["user_id"]}>  -  `{discord.utils.escape_markdown(row["order_reference"])}` '
         f'(order #{row["id"]})'
         for row in rows
     ]
@@ -2895,6 +3157,7 @@ async def admin_milestone_review(interaction: discord.Interaction, member: disco
 
 REWARD_RANKS={'Master':10,'Legend':15,'Paragon':20}
 
+# Check earned rank access and open a private, once-per-rank reward request channel.
 async def create_reward_ticket(interaction: discord.Interaction, rank: str):
     if interaction.guild_id != GUILD_ID or not isinstance(interaction.user, discord.Member):
         return await interaction.response.send_message('Use this in the GYMGUILD server.', ephemeral=True)
@@ -2948,7 +3211,7 @@ async def create_reward_ticket(interaction: discord.Interaction, rank: str):
         await channel.delete(reason='Failed to save reward ticket')
         return await interaction.followup.send('Unable to save the ticket. Please try again.', ephemeral=True)
     await channel.send(
-        f'✦ **{rank} reward — {REWARD_RANKS[rank]}% off**\n'
+        f'✦ **{rank} reward  -  {REWARD_RANKS[rank]}% off**\n'
         f'Requested by {interaction.user.mention}.\n\n'
         'An admin will generate a one-use Shopify discount code and share it privately here. '
         'A moderator can mark the reward fulfilled using the panel below. '
@@ -2959,13 +3222,41 @@ async def create_reward_ticket(interaction: discord.Interaction, rank: str):
 
 
 
+def reward_button_state(gid: int, uid: int) -> dict[str, str]:
+    """Return locked / available / requested for each permanent reward."""
+    rank_for(get_xp(gid, uid), gid, uid)
+    with connect() as db:
+        unlocked = {row['rank'] for row in db.execute(
+            'SELECT rank FROM rank_unlocks WHERE guild_id=? AND user_id=?', (gid, uid))}
+        requested = {row['rank'] for row in db.execute(
+            'SELECT rank FROM reward_tickets WHERE guild_id=? AND user_id=?', (gid, uid))}
+    return {rank: ('requested' if rank in requested else
+                   'available' if rank in unlocked else 'locked')
+            for rank in REWARD_RANKS}
+
+
 class RewardChoiceView(discord.ui.View):
     def __init__(self, user_id: int):
         super().__init__(timeout=180)
         self.user_id = user_id
+        self.refresh_buttons()
+
+    def refresh_buttons(self):
+        states = reward_button_state(GUILD_ID, self.user_id)
+        for item in self.children:
+            for rank in REWARD_RANKS:
+                if item.label and item.label.startswith(rank + ' ·'):
+                    state = states[rank]
+                    item.disabled = state != 'available'
+                    item.label = f'{rank} · {REWARD_RANKS[rank]}%'
+                    if state == 'requested':
+                        item.label += ' ✓ Claimed'
+                    elif state == 'locked':
+                        item.label += ' 🔒'
+                    break
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.user_id:
+        if interaction.guild_id != GUILD_ID or interaction.user.id != self.user_id:
             await interaction.response.send_message('This reward menu belongs to another member.', ephemeral=True)
             return False
         return True
@@ -2988,7 +3279,7 @@ class RewardChoiceView(discord.ui.View):
             return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
         await interaction.response.edit_message(
             content=guild_rewards_progress_text(interaction.guild_id, interaction.user.id),
-            view=self,
+            view=RewardChoiceView(self.user_id),
         )
 
 
@@ -3026,6 +3317,7 @@ async def log_reward_ticket(guild: discord.Guild, row, actor: str, reason: str, 
         return False
 
 
+# Log the closure and delete its private channel, preserving its database audit history.
 async def close_reward_ticket(guild: discord.Guild, channel_id: int, actor: str,
                               reason: str, automatic=False):
     # Record closure atomically before deleting the private channel.
@@ -3082,6 +3374,7 @@ class RewardCloseConfirmView(discord.ui.View):
         await interaction.response.edit_message(content='Ticket remains open.', view=None)
 
 
+# Mod-only reward ticket controls including the Shopify discount confirmation flow.
 class RewardTicketAdminView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -3094,6 +3387,12 @@ class RewardTicketAdminView(discord.ui.View):
             await interaction.response.send_message('This is not a registered reward ticket.', ephemeral=True)
             return False
         return True
+
+    @discord.ui.button(label='Generate Shopify Code', emoji='🏷️',
+                       style=discord.ButtonStyle.primary,
+                       custom_id='guildkeeper:reward:shopify_code')
+    async def shopify_code(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await shopify_rewards.request_code(sys.modules[__name__], interaction)
 
     @discord.ui.button(label='Fulfil Reward', emoji='🎁', style=discord.ButtonStyle.success,
                        custom_id='guildkeeper:reward:fulfil')
@@ -3133,6 +3432,7 @@ async def admin_reward_fulfill(interaction: discord.Interaction):
         await interaction.response.send_message('No open unfulfilled reward ticket found here.', ephemeral=True)
 
 
+# Automatically close old tickets after seven days rather than leave private channels forever.
 async def expire_reward_tickets():
     cutoff = (utc_now() - timedelta(days=7)).isoformat()
     with connect() as db:
@@ -3155,9 +3455,9 @@ async def expire_reward_tickets():
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(member='Member whose reward request will be reset', rank='Reward rank to reset')
 @app_commands.choices(rank=[
-    app_commands.Choice(name='Master — 10% off', value='Master'),
-    app_commands.Choice(name='Legend — 15% off', value='Legend'),
-    app_commands.Choice(name='Paragon — 20% off', value='Paragon'),
+    app_commands.Choice(name='Master  -  10% off', value='Master'),
+    app_commands.Choice(name='Legend  -  15% off', value='Legend'),
+    app_commands.Choice(name='Paragon  -  20% off', value='Paragon'),
 ])
 async def admin_reward_reset(interaction: discord.Interaction, member: discord.Member,
                              rank: app_commands.Choice[str]):
@@ -3190,7 +3490,7 @@ async def admin_reward_reset(interaction: discord.Interaction, member: discord.M
     if isinstance(log_channel, discord.TextChannel):
         embed = discord.Embed(title='✦ Reward Request Reset', colour=discord.Colour.orange(), timestamp=utc_now())
         embed.add_field(name='Member', value=f'{member.mention} (`{member.id}`)', inline=False)
-        embed.add_field(name='Reward', value=f'{rank.value} — {REWARD_RANKS[rank.value]}% off', inline=True)
+        embed.add_field(name='Reward', value=f'{rank.value}  -  {REWARD_RANKS[rank.value]}% off', inline=True)
         embed.add_field(name='Previous status', value=ticket['status'], inline=True)
         embed.add_field(name='Reset by', value=interaction.user.mention, inline=False)
         embed.add_field(name='Ticket channel', value=f'`{ticket["channel_id"]}`', inline=False)
@@ -3267,23 +3567,24 @@ async def admin_weekly_settle(interaction:discord.Interaction):
     await interaction.followup.send('Weekly settlements processed.',ephemeral=True)
 
 
+# Describe the four weekly objectives and calculate their next reset timestamp.
 def weekly_board_embed():
     """The same four objectives that the message tracker awards XP for."""
     reset = next_reset()
     embed = discord.Embed(
-        title='✦ GYMGUILD — WEEKLY SIDE QUEST',
+        title='✦ GYMGUILD  -  WEEKLY SIDE QUEST',
         description='A new quest week has begun! Complete all four objectives to earn **200 XP**.',
         colour=discord.Colour.from_rgb(104, 163, 153),
     )
-    embed.add_field(name='⚔️ 1 · First Flame — 50 XP', value='Post a training activity in <#%s> **with an image or file attached as evidence**.' % TRAINING_LOG_CHANNEL_ID, inline=False)
+    embed.add_field(name='⚔️ 1 · First Flame  -  50 XP', value='Post a training activity in <#%s> **with an image or file attached as evidence**.' % TRAINING_LOG_CHANNEL_ID, inline=False)
     embed.add_field(name='\u200b', value='\u200b', inline=False)
-    embed.add_field(name='🏃 2 · Fuel the Fire — 50 XP', value='Post a second training activity in <#%s> **with an image or file attached as evidence**, on a **different UK calendar day**.' % TRAINING_LOG_CHANNEL_ID, inline=False)
+    embed.add_field(name='🏃 2 · Fuel the Fire  -  50 XP', value='Post a second training activity in <#%s> **with an image or file attached as evidence**, on a **different UK calendar day**.' % TRAINING_LOG_CHANNEL_ID, inline=False)
     embed.add_field(name='\u200b', value='\u200b', inline=False)
-    embed.add_field(name='🏋️ 3 · Flex Text — 25 XP', value='Post a message in any channel within ✦ THE FORGE ✦.', inline=False)
+    embed.add_field(name='🏋️ 3 · Flex Text  -  25 XP', value='Post a message in any channel within ✦ THE FORGE ✦.', inline=False)
     embed.add_field(name='\u200b', value='\u200b', inline=False)
-    embed.add_field(name='🎮 4 · Skill Share — 25 XP', value='Post a message in any channel within ✦ OFF THE CLOCK ✦.', inline=False)
+    embed.add_field(name='🎮 4 · Skill Share  -  25 XP', value='Post a message in any channel within ✦ OFF THE CLOCK ✦.', inline=False)
     embed.add_field(name='​', value='​', inline=False)
-    embed.add_field(name='🏆 Completion bonus — 50 XP', value='Complete all four objectives to claim the bonus automatically.', inline=False)
+    embed.add_field(name='🏆 Completion bonus  -  50 XP', value='Complete all four objectives to claim the bonus automatically.', inline=False)
     embed.add_field(name='━━━━━━━━━━━━━━━━━━━━', value='**Your progress & information**', inline=False)
     embed.add_field(name='Track your progress', value='Complete all four objectives to **automatically turn in your weekly quest** and advance your streak. The **Turn In Quest** button confirms your completion and shows your streak. Use **View Progress**, `/weekly_progress`, `/streak` or `/pause_status`. Messages must be meaningful (at least 25 characters and 5 words).', inline=False)
     embed.add_field(name='Next reset', value=f'<t:{int(reset.timestamp())}:F> · <t:{int(reset.timestamp())}:R>', inline=False)
@@ -3291,6 +3592,7 @@ def weekly_board_embed():
     return embed
 
 
+# Post only one current-week quest board using a saved unique key to prevent duplicates.
 async def post_weekly_board(force=False):
     """Post at most one board per quest week, including after bot downtime."""
     wk = week_key()
@@ -3339,19 +3641,20 @@ async def admin_weekly_post(interaction: discord.Interaction):
     await interaction.followup.send(f'Weekly quest board refresh requested in {channel.mention}.', ephemeral=True)
 
 
+# Display lifetime XP totals. Monthly recap announcements do not reset these totals.
 def leaderboard_embed():
     with connect() as db:
         rows = db.execute(
             'SELECT user_id, xp FROM members WHERE guild_id=? ORDER BY xp DESC, user_id LIMIT 10',
             (GUILD_ID,)).fetchall()
     embed = discord.Embed(
-        title='🏆 GYMGUILD — LEADERBOARD',
+        title='🏆 GYMGUILD  -  LEADERBOARD',
         description='Top 10 Guild members ranked by total XP.',
         color=0x71A7A2)
     if rows:
         for position, row in enumerate(rows, 1):
             embed.add_field(
-                name=f'#{position} — {row["xp"]:,} XP',
+                name=f'#{position}  -  {row["xp"]:,} XP',
                 value=f'<@{row["user_id"]}>', inline=False)
     else:
         embed.add_field(name='No rankings yet', value='Earn XP by completing quests!', inline=False)
@@ -3359,6 +3662,7 @@ def leaderboard_embed():
     return embed
 
 
+# Edit the saved leaderboard message in place, refreshing it once daily.
 async def update_permanent_leaderboard(force=False):
     """Edit the saved message in place; create one only if it does not exist."""
     if not LEADERBOARD_CHANNEL_ID:
@@ -3404,18 +3708,19 @@ PLAYER_STATS_CHANNEL_ID = int(os.getenv('PLAYER_STATS_CHANNEL_ID', '0') or 0)
 
 def player_stats_embed():
     embed = discord.Embed(
-        title='✦ GYMGUILD — PLAYER HUB',
+        title='✦ GYMGUILD  -  PLAYER HUB',
         description=('Welcome to your Guildkeeper player hub! Select a button below '
-                     'to privately view your stats, streak and ranks, manage pauses, and choose Guild Blast notifications.'),
+                     'to privately view your stats, quests, ranks and Inbox, manage pauses, and choose notification settings.'),
         color=0x71A7A2)
     embed.add_field(name='👤 Profile', value='Your XP, rank, and next milestone', inline=False)
     embed.add_field(name='🔥 Streak', value='Your completed weeks and current streak', inline=False)
     embed.add_field(name='🏆 Ranks', value='All Guild XP ranks and requirements', inline=False)
-    embed.add_field(name='⏸️ Activate Pause', value='Use a pause for the current weekly quest (2 per rolling 13 weeks)', inline=False)
-    embed.add_field(name='▶️ Resume XP', value='End an active pause early and resume earning XP; the pause is not refunded', inline=False)
-    embed.add_field(name='🔔 Guild Blast', value='Opt in or out of Guild announcement mentions at any time', inline=False)
+    embed.add_field(name='📜 All Quests', value='Track weekly objectives and permanent milestones with links to their channels', inline=False)
+    embed.add_field(name='⏸️ Pauses', value='Check your balance and active pause; activate or resume XP privately', inline=False)
     embed.add_field(name='🎟️ Claim Reward', value='See eligible one-time rank rewards and open a private ticket with admins', inline=False)
-    embed.add_field(name='🏆 Milestone Quests', value='See your milestones and progress, and submit Shopify orders', inline=False)
+    embed.add_field(name='📥 Inbox', value='Review private alerts and your lost XP history', inline=False)
+    embed.add_field(name='✉️ Bot DMs', value='Disable DMs to stop private pings; Inbox remains available', inline=False)
+    embed.add_field(name='🔔 Guild Blast', value='Opt in or out of Guild announcement mentions at any time', inline=False)
     embed.set_footer(text='GYMGUILD ✦ Where culture meets strength')
     return embed
 
@@ -3427,7 +3732,7 @@ def profile_progress_text(gid: int, uid: int, display_name: str) -> str:
                 if next_rank else 'Maximum rank reached ✦')
     notice = streak_blocked_rank_notice(gid, uid, xp)
     return (
-        f'✦ **{display_name}** — Rank: **{rank_for(xp, gid, uid)}** · XP: **{xp}**\n'
+        f'✦ **{display_name}**  -  Rank: **{rank_for(xp, gid, uid)}** · XP: **{xp}**\n'
         f'🎯 Lifetime objectives completed: **{lifetime_objectives(gid, uid)}**\n'
         f'Longest streak: **{longest_streak(gid, uid)} weeks**\n\n'
         f'**Rewards**\n{reward_eligibility_text(gid, uid)}\n{upcoming}'
@@ -3437,14 +3742,14 @@ def profile_progress_text(gid: int, uid: int, display_name: str) -> str:
 
 def streak_progress_text(gid: int, uid: int) -> str:
     return (
-        f'🔥 **Your Weekly Streak** — Completed weeks: **{completed_weeks(gid, uid)}** '
+        f'🔥 **Your Weekly Streak**  -  Completed weeks: **{completed_weeks(gid, uid)}** '
         f'· Current streak: **{active_streak(gid, uid)}**. '
         'Paused weeks preserve but do not increase your streak.'
     )
 
 
 def ranks_progress_embed(gid: int, uid: int) -> discord.Embed:
-    embed = discord.Embed(title='✦ GYMGUILD — RANKS', color=0x71A7A2)
+    embed = discord.Embed(title='✦ GYMGUILD  -  RANKS', color=0x71A7A2)
     for name, threshold in RANKS:
         requirement = (f'{threshold:,} XP + **{STREAK_REQUIREMENTS[name]}-week active streak**'
                        if name in STREAK_REQUIREMENTS else f'{threshold:,} XP')
@@ -3513,6 +3818,176 @@ class PrivateProgressView(discord.ui.View):
         )
 
 
+class NotificationInboxView(discord.ui.View):
+    def __init__(self, uid):
+        super().__init__(timeout=300)
+        self.uid = uid
+
+    async def interaction_check(self, interaction):
+        if interaction.guild_id != GUILD_ID or interaction.user.id != self.uid:
+            await interaction.response.send_message('This private inbox is not yours.',ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='Unread', emoji='🔔', style=discord.ButtonStyle.secondary)
+    async def unread(self, interaction, button):
+        await interaction.response.edit_message(content=inbox_text(interaction.guild_id,self.uid),view=self)
+
+    @discord.ui.button(label='All', emoji='📥', style=discord.ButtonStyle.secondary)
+    async def all(self, interaction, button):
+        await interaction.response.edit_message(content=inbox_text(interaction.guild_id,self.uid,'all'),view=self)
+
+    @discord.ui.button(label='Lost XP', emoji='📉', style=discord.ButtonStyle.secondary)
+    async def xp(self, interaction, button):
+        await interaction.response.edit_message(content=inbox_text(interaction.guild_id,self.uid,'xp'),view=self)
+
+    @discord.ui.button(label='Mark All Read', emoji='✅', style=discord.ButtonStyle.success,row=1)
+    async def mark_read(self, interaction, button):
+        with connect() as db:
+            db.execute('UPDATE player_notifications SET read_at=? '
+                       'WHERE guild_id=? AND user_id=? AND read_at IS NULL',
+                       (utc_now().isoformat(),interaction.guild_id,self.uid))
+        await interaction.response.edit_message(content=inbox_text(interaction.guild_id,self.uid,'all'),view=self)
+
+
+class BotDMToggleView(discord.ui.View):
+    def __init__(self, uid):
+        super().__init__(timeout=180)
+        self.uid = uid
+        enabled = bot_dms_enabled(GUILD_ID, uid)
+        for item in self.children:
+            if item.label == 'Enable Bot DMs':
+                item.disabled = enabled
+            elif item.label == 'Disable Bot DMs':
+                item.disabled = not enabled
+
+    async def interaction_check(self, interaction):
+        if interaction.guild_id != GUILD_ID or interaction.user.id != self.uid:
+            await interaction.response.send_message('These settings are not yours.',ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='Enable Bot DMs', emoji='✉️', style=discord.ButtonStyle.success)
+    async def enable(self, interaction, button):
+        set_bot_dms(interaction.guild_id,self.uid,True)
+        await interaction.response.edit_message(
+            content='✅ **Bot DMs enabled.** Private reminders will be delivered by DM and '
+                    'saved in your Inbox in **#stats-and-streaks**.',view=None)
+
+    @discord.ui.button(label='Disable Bot DMs', emoji='🔕', style=discord.ButtonStyle.secondary)
+    async def disable(self, interaction, button):
+        set_bot_dms(interaction.guild_id,self.uid,False)
+        await interaction.response.edit_message(
+            content='🔕 **Bot DMs disabled.** You will not receive proactive private '
+                    'DMs or pings for streaks, XP or deadlines. Notifications are still saved '
+                    'in your private **Inbox** in **#stats-and-streaks**, but you must check it yourself.',
+            view=None)
+
+
+def quest_channel_link(guild: discord.Guild, channel_id: int, fallback: str) -> str:
+    """Mention an existing Guild channel; never link to a guessed location."""
+    channel = guild.get_channel(channel_id) if channel_id else None
+    return channel.mention if isinstance(channel, discord.TextChannel) else fallback
+
+
+def quest_category_link(guild: discord.Guild, category_id: int, fallback: str) -> str:
+    category = guild.get_channel(category_id) if category_id else None
+    if isinstance(category, discord.CategoryChannel):
+        channels = [c for c in category.text_channels
+                    if c.permissions_for(guild.default_role).view_channel]
+        if channels:
+            return channels[0].mention
+    return fallback
+
+
+def milestone_board_link(guild: discord.Guild) -> str:
+    with connect() as db:
+        saved = db.execute('SELECT value FROM v12_config WHERE key=?',
+                           (f'milestone-board-{guild.id}',)).fetchone()
+    if saved:
+        try:
+            channel_id, message_id = map(int, saved['value'].split(':'))
+            channel = guild.get_channel(channel_id)
+            if isinstance(channel, discord.TextChannel):
+                return f'[Open Milestone Quests board](https://discord.com/channels/{guild.id}/{channel_id}/{message_id})'
+        except (TypeError, ValueError):
+            pass
+    return 'Ask an admin where the Milestone Quests board is posted.'
+
+
+def all_quests_embed(guild: discord.Guild, uid: int) -> discord.Embed:
+    """Private directory of the two active quest categories; Starter Quests are excluded."""
+    gid = guild.id
+    wk = week_key()
+    kinds = weekly_status(gid, uid, wk)
+    progress = milestone_progress(gid, uid)
+    paused = is_paused(gid, uid, wk)
+    weekly_channel = quest_channel_link(guild, QUESTS_CHANNEL_ID, 'Ask an admin for the Weekly Quest channel')
+    training_channel = quest_channel_link(guild, TRAINING_LOG_CHANNEL_ID, 'the training log')
+    forge_channel = quest_category_link(guild, GYM_CATEGORY_ID, 'a channel in ✦ THE FORGE ✦')
+    hobby_channel = quest_category_link(guild, HOBBY_CATEGORY_ID, 'a channel in ✦ OFF THE CLOCK ✦')
+    embed = discord.Embed(
+        title='✦ GYMGUILD  -  ALL QUESTS',
+        description=('Track your Guild quests and find their channels here. '
+                     '**Starter Quests are not included.** Your progress is visible only to you.'),
+        colour=discord.Colour.from_rgb(104, 163, 153),
+    )
+    requirements = [
+        ('training1', 'First Flame', f'Post a training update with an attachment in {training_channel}.'),
+        ('training2', 'Fuel the Fire', f'Post a second training update with an attachment on a different UK day in {training_channel}.'),
+        ('gym', 'Flex Text', f'Post a meaningful message in {forge_channel} (The Forge).'),
+        ('hobby', 'Skill Share', f'Post a meaningful message in {hobby_channel} (Off The Clock).'),
+    ]
+    items = [f'{"✅" if key in kinds else "⬜"} **{title}**  -  {description}'
+             for key, title, description in requirements]
+    note = ('⏸️ Paused  -  weekly XP cannot be earned until resumed.'
+            if paused else 'All four objectives automatically award the 50 XP completion bonus.')
+    embed.add_field(
+        name=f'⚔️ Weekly Side Quest  -  {len(kinds)}/4 objectives',
+        value=('Complete four objectives each week for up to **200 XP**, including '
+               'the completion bonus. Resets Monday 00:00 UK time.\n\n'
+               + '\n'.join(items) + '\n\n' + note
+               + f'\n**Quest board:** {weekly_channel}'),
+        inline=False)
+    milestone_lines = []
+    for key, label, xp, description in MILESTONE_QUESTS:
+        milestone_lines.append(
+            f'{"✅" if key in progress["claimed"] else "⬜"} **{label}** (+{xp} XP)  -  {description}')
+    embed.add_field(
+        name=f'🏆 Milestone Quests  -  {progress["completed"]}/{progress["total"]} completed',
+        value=('Permanent one-time achievements for training streaks, boosting the Guild '
+               'and your first verified Shopify purchase.\n\n'
+               + '\n'.join(milestone_lines)),
+        inline=False)
+    embed.add_field(
+        name='✦ Main Quest Completion',
+        value=('✅ **+500 XP bonus earned!**' if progress['bonus_earned'] else
+               f'🔒 Complete all six milestones for a one-time **+500 XP** bonus.')
+              + '\n' + milestone_board_link(guild),
+        inline=False)
+    embed.add_field(name='⏸️ Weekly XP Pause Status', value=quest_pause_notice(gid, uid), inline=False)
+    embed.set_footer(text='Use Refresh to check your latest quest progress.')
+    return embed
+
+
+class AllQuestsView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild_id != GUILD_ID or interaction.user.id != self.user_id:
+            await interaction.response.send_message('This quest panel belongs to another member.', ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='Refresh Quests', emoji='🔄', style=discord.ButtonStyle.secondary)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=all_quests_embed(interaction.guild, self.user_id), view=self)
+
+
+# Permanent Player Hub controls: each member gets their own ephemeral progress menus.
 class PlayerStatsView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -3534,75 +4009,43 @@ class PlayerStatsView(discord.ui.View):
     @discord.ui.button(label='Ranks', emoji='🏆', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:stats:ranks')
     async def ranks_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID:
+            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
         await interaction.response.send_message(
-            **private_progress_content('ranks', interaction),
-            view=PrivateProgressView(interaction.user.id, 'ranks'), ephemeral=True)
+            embed=ranks_progress_embed(interaction.guild_id, interaction.user.id),
+            view=RankProfileButtonView(interaction.user.id), ephemeral=True)
 
-    @discord.ui.button(label='Activate Pause', emoji='⏸️', style=discord.ButtonStyle.primary,
+    @discord.ui.button(label='Pauses', emoji='⏸️', style=discord.ButtonStyle.secondary,
                        custom_id='guildkeeper:stats:activate_pause', row=1)
     async def activate_pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.guild_id != GUILD_ID:
             return await interaction.response.send_message('This button is not available here.', ephemeral=True)
         await interaction.response.send_message(
-            '⏸️ **Are you sure you want to activate a pause?** '
-            'This uses one of your two pauses in a rolling 13-week period for the current week.\n'
-            + pause_allowance_text(interaction.guild_id, interaction.user.id),
-            view=ConfirmPauseView(interaction.user.id), ephemeral=True)
+            pause_panel_text(interaction.guild_id, interaction.user.id),
+            view=PausePanelView(interaction.user.id), ephemeral=True)
 
 
-    @discord.ui.button(label='Resume XP', emoji='▶️', style=discord.ButtonStyle.success,
-                       custom_id='guildkeeper:stats:resume_xp', row=1)
-    async def resume_xp_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label='Inbox', emoji='📥', style=discord.ButtonStyle.secondary,
+                       custom_id='guildkeeper:stats:inbox',row=2)
+    async def inbox_button(self, interaction, button):
         if interaction.guild_id != GUILD_ID:
-            return await interaction.response.send_message('This button is not available here.', ephemeral=True)
-        if not is_paused(interaction.guild_id, interaction.user.id, week_key()):
-            return await interaction.response.send_message(
-                '▶️ You do not currently have an active pause. XP is already enabled.\n'
-                + pause_allowance_text(interaction.guild_id, interaction.user.id), ephemeral=True)
+            return await interaction.response.send_message('Only available in GYMGUILD.',ephemeral=True)
         await interaction.response.send_message(
-            '▶️ **Resume earning XP?** Your pause will end immediately and you can earn weekly XP again. '
-            '**This will NOT refund your pause** — it still counts toward your 2 pauses per rolling 13 weeks. '
-            'The week will remain recorded as a pause for streak protection.\n'
-            + pause_allowance_text(interaction.guild_id, interaction.user.id),
-            view=ConfirmResumeView(interaction.user.id), ephemeral=True)
-
-
-    @discord.ui.button(label='Guild Blast', emoji='🔔', style=discord.ButtonStyle.secondary,
-                       custom_id='guildkeeper:stats:guild_blast', row=1)
-    async def guild_blast_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.guild_id != GUILD_ID or not isinstance(interaction.user, discord.Member):
-            return await interaction.response.send_message('This button is only available in the Guild.', ephemeral=True)
-        role = interaction.guild.get_role(GUILD_BLAST_ROLE_ID) if GUILD_BLAST_ROLE_ID else None
-        if role is None:
-            return await interaction.response.send_message('Guild Blast is not configured. Ask an admin to set GUILD_BLAST_ROLE_ID.', ephemeral=True)
-        enabled = role in interaction.user.roles
-        await interaction.response.send_message(
-            f'🔔 **Guild Blast** — Currently **{"enabled" if enabled else "disabled"}**.\n'
-            'Guild Blast is an optional role used for announcements by admins and Guildkeeper. '
-            'Choose below to change your preference.',
-            view=GuildBlastToggleView(interaction.user.id), ephemeral=True)
+            inbox_text(interaction.guild_id,interaction.user.id),
+            view=NotificationInboxView(interaction.user.id),ephemeral=True)
 
     @discord.ui.button(label='Bot DMs', emoji='✉️', style=discord.ButtonStyle.secondary,
-                       custom_id='guildkeeper:stats:bot_dms', row=1)
-    async def bot_dms_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.guild_id != GUILD_ID or not isinstance(interaction.user, discord.Member):
-            return await interaction.response.send_message(
-                'This option is available only in GYMGUILD.', ephemeral=True)
-        enabled = bot_dm_enabled(interaction.guild_id, interaction.user.id)
-        await interaction.response.send_message(
-            bot_dm_preference_text(enabled),
-            view=BotDMToggleView(interaction.user.id), ephemeral=True,
-        )
-
-    @discord.ui.button(label='Milestone Quests', emoji='🏆', style=discord.ButtonStyle.secondary,
-                       custom_id='guildkeeper:stats:milestone_quests', row=2)
-    async def milestone_quests_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+                       custom_id='guildkeeper:stats:bot_dms',row=2)
+    async def dm_button(self, interaction, button):
         if interaction.guild_id != GUILD_ID:
-            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
+            return await interaction.response.send_message('Only available in GYMGUILD.',ephemeral=True)
+        enabled = bot_dms_enabled(interaction.guild_id,interaction.user.id)
         await interaction.response.send_message(
-            embed=milestone_quests_embed(interaction.guild_id, interaction.user.id),
-            view=MilestoneQuestsView(interaction.user.id), ephemeral=True,
-        )
+            f'✉️ **Bot DMs are {"ON" if enabled else "OFF"}.**\n\n'
+            'If you disable Bot DMs, GuildKeeper will no longer proactively ping or DM you. '
+            'All notifications, including XP deductions, will still appear in your private '
+            '**Inbox** in **#stats-and-streaks**, but you must check it yourself.',
+            view=BotDMToggleView(interaction.user.id),ephemeral=True)
 
     @discord.ui.button(label='Claim Reward', emoji='🎟️', style=discord.ButtonStyle.primary,
                        custom_id='guildkeeper:stats:reward_ticket', row=1)
@@ -3614,40 +4057,43 @@ class PlayerStatsView(discord.ui.View):
             view=RewardChoiceView(interaction.user.id), ephemeral=True)
 
 
-class BotDMToggleView(discord.ui.View):
-    """A private user-owned menu; only its owner can change their reminders."""
-    def __init__(self, user_id: int):
-        super().__init__(timeout=180)
-        self.user_id = user_id
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                'These notification settings belong to another member.', ephemeral=True)
-            return False
-        return True
-
-    @discord.ui.button(label='Turn On', emoji='🔔', style=discord.ButtonStyle.success)
-    async def enable(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label='All Quests', emoji='📜', style=discord.ButtonStyle.secondary,
+                       custom_id='guildkeeper:stats:all_quests', row=1)
+    async def all_quests_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.guild_id != GUILD_ID:
             return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
-        set_bot_dm_enabled(interaction.guild_id, interaction.user.id, True)
-        await interaction.response.edit_message(
-            content=bot_dm_preference_text(True), view=self)
+        await interaction.response.send_message(
+            embed=all_quests_embed(interaction.guild, interaction.user.id),
+            view=AllQuestsView(interaction.user.id), ephemeral=True)
 
-    @discord.ui.button(label='Turn Off', emoji='🔕', style=discord.ButtonStyle.secondary)
-    async def disable(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.guild_id != GUILD_ID:
-            return await interaction.response.send_message('Only available in GYMGUILD.', ephemeral=True)
-        set_bot_dm_enabled(interaction.guild_id, interaction.user.id, False)
-        await interaction.response.edit_message(
-            content=bot_dm_preference_text(False), view=self)
+    @discord.ui.button(label='Guild Blast', emoji='🔔', style=discord.ButtonStyle.secondary,
+                       custom_id='guildkeeper:stats:guild_blast', row=2)
+    async def guild_blast_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID or not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message('This button is only available in the Guild.', ephemeral=True)
+        role = interaction.guild.get_role(GUILD_BLAST_ROLE_ID) if GUILD_BLAST_ROLE_ID else None
+        if role is None:
+            return await interaction.response.send_message('Guild Blast is not configured. Ask an admin to set GUILD_BLAST_ROLE_ID.', ephemeral=True)
+        enabled = role in interaction.user.roles
+        await interaction.response.send_message(
+            f'🔔 **Guild Blast**  -  Currently **{"enabled" if enabled else "disabled"}**.\n'
+            'Guild Blast is an optional role used for announcements by admins and Guildkeeper. '
+            'Choose below to change your preference.',
+            view=GuildBlastToggleView(interaction.user.id, enabled), ephemeral=True)
+
 
 
 class GuildBlastToggleView(discord.ui.View):
-    def __init__(self, user_id: int):
+    def __init__(self, user_id: int, currently_enabled: bool | None = None):
         super().__init__(timeout=180)
         self.user_id = user_id
+        if currently_enabled is not None:
+            for item in self.children:
+                if item.label == 'Enable Guild Blast':
+                    item.disabled = currently_enabled
+                elif item.label == 'Disable Guild Blast':
+                    item.disabled = not currently_enabled
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
@@ -3681,6 +4127,135 @@ def pause_allowance_text(gid: int, uid: int) -> str:
             (gid, uid, cutoff, week_key())
         ).fetchone()['n']
     return f'**Pauses remaining: {max(0, 2-used)}/2.**'
+
+
+def pause_panel_text(gid: int, uid: int) -> str:
+    """Read the current weekly pause and rolling allowance without changing either."""
+    current_week = week_key()
+    cutoff = (week_start() - timedelta(weeks=13)).date().isoformat()
+    with connect() as db:
+        used = db.execute(
+            'SELECT COUNT(*) AS n FROM pauses WHERE guild_id=? AND user_id=? '
+            'AND week_key>? AND week_key<=?',
+            (gid, uid, cutoff, current_week)).fetchone()['n']
+        spent_current = db.execute(
+            'SELECT 1 FROM pauses WHERE guild_id=? AND user_id=? AND week_key=?',
+            (gid, uid, current_week)).fetchone() is not None
+    paused_now = is_paused(gid, uid, current_week)
+    remaining = max(0, 2 - used)
+    if paused_now:
+        status = '⏸️ **Active pause  -  XP collection is suspended.**'
+        explanation = ('Your current Weekly Side Quest is paused. Weekly activity will not earn XP '
+                       'until you resume. Your streak is protected for this week.')
+    elif spent_current:
+        status = '▶️ **XP collection resumed  -  pause already used this week.**'
+        explanation = ('You can earn weekly XP again, but this week\'s pause remains spent. '
+                       'It cannot be refunded or activated again this week.')
+    else:
+        status = '✅ **No active pause  -  XP collection is enabled.**'
+        explanation = 'You can earn weekly XP normally.'
+    return (
+        '⏸️ **GYMGUILD  -  YOUR PAUSES**\n'
+        f'**Pauses remaining:** {remaining}/2 (rolling 13 weeks)\n'
+        f'**Current week:** {current_week}\n'
+        f'{status}\n{explanation}\n'
+        f'**Next weekly reset:** <t:{int(next_reset().timestamp())}:F>\n\n'
+        '⚠️ **This action cannot be undone.** Activating consumes one of your two '
+        'pauses immediately and suspends weekly XP accumulation. Resuming XP '
+        '**does not return your pause**; it only allows you to earn XP again. '
+        'Used pauses replenish only when they fall outside the rolling 13-week window.'
+    )
+
+
+def pause_button_state(gid: int, uid: int) -> tuple[bool, bool]:
+    """Return (can_activate, can_resume) for the current week."""
+    wk = week_key()
+    cutoff = (week_start() - timedelta(weeks=13)).date().isoformat()
+    with connect() as db:
+        used = db.execute(
+            'SELECT COUNT(*) AS n FROM pauses WHERE guild_id=? AND user_id=? '
+            'AND week_key>? AND week_key<=?', (gid, uid, cutoff, wk)
+        ).fetchone()['n']
+        spent = db.execute(
+            'SELECT 1 FROM pauses WHERE guild_id=? AND user_id=? AND week_key=?',
+            (gid, uid, wk)).fetchone() is not None
+        resumed = db.execute(
+            'SELECT 1 FROM resumed_pauses WHERE guild_id=? AND user_id=? AND week_key=?',
+            (gid, uid, wk)).fetchone() is not None
+    return (not spent and used < 2, spent and not resumed)
+
+
+class PausePanelView(discord.ui.View):
+    """Private, short-lived pause controls. The persistent hub remains unchanged."""
+    def __init__(self, user_id: int):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.refresh_buttons()
+
+    def refresh_buttons(self):
+        can_activate, can_resume = pause_button_state(GUILD_ID, self.user_id)
+        for item in self.children:
+            if item.label == 'Activate Pause':
+                item.disabled = not can_activate
+            elif item.label == 'Resume XP':
+                item.disabled = not can_resume
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild_id != GUILD_ID or interaction.user.id != self.user_id:
+            await interaction.response.send_message('This pause panel belongs to another member.', ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='Activate Pause', emoji='⏸️', style=discord.ButtonStyle.danger)
+    async def activate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        gid, uid = interaction.guild_id, interaction.user.id
+        with connect() as db:
+            exists = db.execute(
+                'SELECT 1 FROM pauses WHERE guild_id=? AND user_id=? AND week_key=?',
+                (gid, uid, week_key())).fetchone() is not None
+        if exists or is_paused(gid, uid, week_key()):
+            return await interaction.response.send_message(
+                'This week\'s pause has already been used. You cannot spend it twice or reactivate it. '
+                'Use **Refresh** to view your current status.', ephemeral=True)
+        cutoff = (week_start() - timedelta(weeks=13)).date().isoformat()
+        with connect() as db:
+            used = db.execute(
+                'SELECT COUNT(*) AS n FROM pauses WHERE guild_id=? AND user_id=? '
+                'AND week_key>? AND week_key<=?',
+                (gid, uid, cutoff, week_key())).fetchone()['n']
+        if used >= 2:
+            return await interaction.response.send_message(
+                'Both pauses have been used in the rolling 13-week window. '
+                'Use **Refresh** to check your balance.', ephemeral=True)
+        await interaction.response.send_message(
+            '⚠️ **Are you absolutely sure you want to use a pause?**\n\n'
+            '• This immediately uses **1 of your 2 pauses** in a rolling 13-week period.\n'
+            '• You **will not accumulate weekly activity XP** while paused.\n'
+            '• The pause protects this week\'s streak from inactivity.\n'
+            '• You can **Resume XP** later, but this **does not undo or refund** the pause.\n\n'
+            '**This action cannot be undone.** Confirm only if you want to spend a pause.',
+            view=ConfirmPauseView(uid), ephemeral=True)
+
+    @discord.ui.button(label='Resume XP', emoji='▶️', style=discord.ButtonStyle.success)
+    async def resume(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_paused(interaction.guild_id, interaction.user.id, week_key()):
+            return await interaction.response.send_message(
+                'XP collection is already enabled. No active pause to resume.\n'
+                + pause_allowance_text(interaction.guild_id, interaction.user.id),
+                ephemeral=True)
+        await interaction.response.send_message(
+            '▶️ **Resume XP collection?** You will earn XP again from future qualifying activity. '
+            '**Your pause will NOT be refunded** and will still count toward your '
+            'two pauses in a rolling 13-week window. The recorded paused week '
+            'will continue to protect your streak.',
+            view=ConfirmResumeView(self.user_id), ephemeral=True)
+
+    @discord.ui.button(label='Refresh', emoji='🔄', style=discord.ButtonStyle.secondary)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.refresh_buttons()
+        await interaction.response.edit_message(
+            content=pause_panel_text(interaction.guild_id, interaction.user.id),
+            view=self)
 
 
 class ConfirmResumeView(discord.ui.View):
@@ -3757,8 +4332,10 @@ class ConfirmPauseView(discord.ui.View):
                 db.execute('INSERT INTO pauses VALUES (?,?,?,?)',
                            (interaction.guild_id, interaction.user.id, wk, utc_now().isoformat()))
                 result = (f'✅ **Pause activated!** Your Weekly Side Quest for **{wk}** is paused. '
-                          'Your streak is protected and you will not receive an inactivity penalty this week. '
-                          'Your pause ends at the next weekly reset.')
+                          '**Weekly XP collection is now suspended.** Your streak is protected '
+                          'and you will not receive an inactivity penalty this week. '
+                          '**This pause has been spent permanently** and cannot be refunded, '
+                          'even if you resume XP collection. Your pause ends at the next weekly reset.')
         result += '\n' + pause_allowance_text(interaction.guild_id, interaction.user.id)
         await interaction.response.edit_message(content=result, view=None)
 
@@ -3859,7 +4436,7 @@ def bot_dm_reminder_message(kind: str, streak: int, objectives: int) -> str:
     raise ValueError('Unsupported reminder kind')
 
 
-def bot_dm_reminder_candidates(gid: int, now: datetime | None = None) -> list[dict]:
+def bot_dm_reminder_candidates(gid: int, now: datetime | None = None, include_opted_out=False) -> list[dict]:
     """Return only members currently eligible for the daily reminder.
 
     This is a read-only selection pass; the send path rechecks preferences
@@ -3874,11 +4451,11 @@ def bot_dm_reminder_candidates(gid: int, now: datetime | None = None) -> list[di
             'SELECT user_id FROM members WHERE guild_id=?', (gid,))]
     eligible = []
     for uid in user_ids:
-        if not bot_dm_enabled(gid, uid) or is_paused(gid, uid, wk):
+        if (not include_opted_out and not bot_dm_enabled(gid, uid)) or is_paused(gid, uid, wk):
             continue
         objectives = len(weekly_status(gid, uid, wk) & set(WEEKLY_TEST_XP))
         if kind == 'streak':
-            prior_streak = active_streak(gid, uid)
+            prior_streak = active_streak(gid, uid, now)
             if objectives >= 4 or prior_streak <= 0:
                 continue
         else:
@@ -3899,7 +4476,7 @@ def claim_bot_dm_reminder(gid: int, uid: int, wk: str, kind: str) -> bool:
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
         pref = db.execute(
-            'SELECT enabled FROM bot_dm_preferences WHERE guild_id=? AND user_id=?',
+            'SELECT dm_enabled AS enabled FROM notification_preferences WHERE guild_id=? AND user_id=?',
             (gid, uid),
         ).fetchone()
         if pref is not None and not pref['enabled']:
@@ -3965,20 +4542,50 @@ async def send_weekly_bot_dm_reminders(now: datetime | None = None) -> dict:
 
 
 @tasks.loop(minutes=1)
+# Every minute, run independent jobs so one failed task cannot stop the rest. Health Check records failures.
 async def scheduler():
-    await settle_previous_weeks()
-    await post_weekly_board()
-    await update_permanent_leaderboard()
-    await expire_reward_tickets()
-    await send_weekly_bot_dm_reminders()
+    """Run independent jobs even if one fails; surface errors in Admin Health."""
+    for name, operation in (
+        ('weekly_settlement', settle_previous_weeks),
+        ('streak_warnings', create_streak_warnings),
+        ('notifications', deliver_notifications),
+        ('weekly_board', post_weekly_board),
+        ('leaderboard', update_permanent_leaderboard),
+        ('reward_ticket_expiry', expire_reward_tickets),
+        ('scheduled_announcements', announcements_scheduler.tick),
+        ('shopify_store_events', shopify_events.tick),
+    ):
+        try:
+            result = operation()
+            if asyncio.iscoroutine(result):
+                await result
+            admin_maintenance.record_job(api=sys.modules[__name__],
+                                         name=name, success=True)
+        except Exception as error:
+            log.exception('Scheduled task %s failed', name)
+            try:
+                admin_maintenance.record_job(api=sys.modules[__name__],
+                                             name=name, success=False, error=type(error).__name__)
+            except Exception:
+                log.exception('Could not persist failure of scheduled task %s', name)
+    # Auto-repair missing/outdated permanent buttons periodically as well as on startup.
+    try:
+        if admin_maintenance.needs_periodic_check(sys.modules[__name__]):
+            guild = bot.get_guild(GUILD_ID)
+            if guild is not None:
+                await admin_maintenance.reconcile(sys.modules[__name__], guild)
+    except Exception:
+        log.exception('Periodic permanent panel maintenance failed')
 
 @scheduler.before_loop
+# Wait until Discord has connected before starting time-based jobs.
 async def before_scheduler():
     await bot.wait_until_ready()
 
 startup_synced = False
 
 @bot.event
+# Initialize per-guild startup tasks, rank sync and panel maintenance just once.
 async def on_ready():
     global startup_synced
     log.info('Guildkeeper online as %s | Guild ID %s', bot.user, GUILD_ID)
@@ -3998,8 +4605,16 @@ async def on_ready():
     except (discord.HTTPException, discord.Forbidden):
         log.exception('Startup rank sync failed; verify Server Members Intent and permissions')
 
+    # Panel maintenance does not block or affect the existing scheduled jobs.
+    try:
+        report = await admin_maintenance.reconcile(sys.modules[__name__], guild)
+        log.info('Permanent panel health after startup: %s', report)
+    except Exception:
+        log.exception('Automatic panel maintenance failed; use Admin Hub Health Check')
+
 
 @bot.tree.error
+# Handle slash-command errors without exposing internal stack traces to members.
 async def on_app_command_error(interaction, error):
     if isinstance(error,app_commands.MissingPermissions):
         message = 'You need Manage Server permission for this command.'
@@ -4017,9 +4632,20 @@ async def on_app_command_error(interaction, error):
     except discord.HTTPException:
         log.exception('Could not deliver application command error response')
 
+admin_hub.install(sys.modules[__name__])
+testing_cheats.install(sys.modules[__name__])
+test_runner.install(sys.modules[__name__])
+announcements_scheduler.install(sys.modules[__name__])
+announcement_ui.api = sys.modules[__name__]
+message_scheduler_panel.install(sys.modules[__name__])
+shopify_discord.install(sys.modules[__name__])
+shopify_events.install(sys.modules[__name__])
+
+
 if __name__=='__main__':
     if not TOKEN or TOKEN=='PASTE_YOUR_BOT_TOKEN_HERE' or not GUILD_ID:
         raise SystemExit('Set DISCORD_TOKEN and GUILD_ID in your .env file first.')
     setup_db()
     migrate_monday_week_keys()
     bot.run(TOKEN)
+
