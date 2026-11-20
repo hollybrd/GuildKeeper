@@ -179,6 +179,11 @@ def setup_db():
           user_id INTEGER NOT NULL, category TEXT NOT NULL, title TEXT NOT NULL,
           body TEXT NOT NULL, event_key TEXT, created_at TEXT NOT NULL,
           read_at TEXT, dm_sent_at TEXT, UNIQUE(guild_id,user_id,event_key));
+        CREATE TABLE IF NOT EXISTS bot_dm_reminders (
+          guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+          week_key TEXT NOT NULL, reminder_kind TEXT NOT NULL,
+          attempted_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'attempted',
+          PRIMARY KEY(guild_id,user_id,week_key,reminder_kind));
         ''')
         # Carry forward any historical first-purchase requests without touching
         # milestone claims, XP balances or existing moderator decisions.
@@ -260,6 +265,27 @@ def completed_weeks(guild_id, user_id):
 
 STREAK_REQUIREMENTS = {'Master': 2, 'Legend': 4, 'Paragon': 8}
 
+def bot_dm_enabled(gid, uid):
+    return bot_dms_enabled(gid, uid)
+
+
+def set_bot_dm_enabled(gid, uid, enabled):
+    set_bot_dms(gid, uid, enabled)
+
+
+def bot_dm_preference_text(enabled: bool) -> str:
+    if enabled:
+        return (
+            '🔔 **Bot DMs are ON.** GuildKeeper can privately remind you before '
+            'your weekly streak is at risk or you could lose inactivity XP.\n\n'
+            'To switch them off, open the **Player Hub → Bot DMs → Turn Off**.'
+        )
+    return (
+        '🔕 **Bot DMs are OFF.** You won’t receive GuildKeeper streak or inactivity '
+        'warnings. To turn them on, open the **Player Hub → Bot DMs → Turn On**.'
+    )
+
+
 # Build the set of credited weeks, including admin test credits, for streak calculations.
 def streak_weeks(gid, uid):
     with connect() as db:
@@ -273,9 +299,9 @@ def streak_weeks(gid, uid):
     return completed, paused
 
 # Calculate the current consecutive streak, respecting pauses and missed weeks.
-def active_streak(gid, uid):
+def active_streak(gid, uid, now=None):
     completed, paused = streak_weeks(gid,uid)
-    cursor = week_start()
+    cursor = week_start(now)
     # An unfinished current week doesn't interrupt the completed streak yet.
     if cursor.date().isoformat() not in completed:
         cursor -= timedelta(days=7)
@@ -475,32 +501,13 @@ async def deliver_notifications():
 
 # Create ahead-of-reset reminders for members who may lose streak/XP.
 def create_streak_warnings():
-    if utc_now().astimezone(TZ).weekday() != 6:
-        return
-    wk = week_key()
-    with connect() as db:
-        members = db.execute('SELECT user_id FROM members WHERE guild_id=?',(GUILD_ID,)).fetchall()
-        for member in members:
-            uid = member['user_id']
-            if not db.execute('SELECT 1 FROM starter_turnins WHERE guild_id=? AND user_id=?',
-                              (GUILD_ID,uid)).fetchone():
-                continue
-            if db.execute('SELECT 1 FROM weekly_completions WHERE guild_id=? AND user_id=? AND week_key=?',
-                          (GUILD_ID,uid,wk)).fetchone():
-                continue
-            if db.execute('SELECT 1 FROM pauses p WHERE guild_id=? AND user_id=? AND week_key=? '
-                          'AND NOT EXISTS (SELECT 1 FROM resumed_pauses r '
-                          'WHERE r.guild_id=p.guild_id AND r.user_id=p.user_id AND r.week_key=p.week_key)',
-                          (GUILD_ID,uid,wk)).fetchone():
-                continue
-            count = db.execute('SELECT COUNT(*) n FROM weekly_actions WHERE guild_id=? AND user_id=? '
-                               "AND week_key=? AND kind IN ('training1','training2','gym','hobby')",
-                               (GUILD_ID,uid,wk)).fetchone()['n']
-            record_notification(db,GUILD_ID,uid,'streak','Weekly Quest Deadline',
-                                f'{count}/4 objectives recorded. Complete your Weekly Quest '
-                                'before Monday 00:00 UK time to protect your streak. '
-                                'Fully inactive weeks may deduct 25 XP.',
-                                f'weekly-warning:{wk}')
+    for candidate in bot_dm_reminder_candidates(GUILD_ID, include_opted_out=True):
+        with connect() as db:
+            kind = candidate['kind']
+            record_notification(db, GUILD_ID, candidate['user_id'], 'streak',
+                                'Weekly Quest Deadline',
+                                bot_dm_reminder_message(kind, candidate['streak'], candidate['objectives']),
+                                f"weekly-warning:{candidate['week_key']}:{kind}")
 
 
 # Update lifetime XP and write a reasoned history entry; clamp deductions at zero.
@@ -800,20 +807,38 @@ async def admin_spawnpoint_test(interaction: discord.Interaction, member: discor
     )
 
 
+def guildkeeper_welcome_dm() -> str:
+    """One short onboarding DM; never gate access on Discord DM permissions."""
+    start_here = f'<#{STARTER_CHANNEL_ID}>' if STARTER_CHANNEL_ID else '#start-here'
+    player_hub = (f'<#{PLAYER_STATS_CHANNEL_ID}>' if PLAYER_STATS_CHANNEL_ID
+                  else '#stats-and-streaks')
+    return (
+        '🛡️ **Welcome to GYMGUILD!** ✦\n'
+        f'Head to {start_here} and complete your **Starter Quest** to unlock '
+        'all Guild channels.\n\n'
+        'GuildKeeper reminders are on by default. After completing the Starter Quest, '
+        f'you can switch them off in {player_hub} → **Player Hub → Bot DMs → Turn Off**.'
+    )
+
+
+async def send_guildkeeper_welcome_dm(member: discord.Member) -> bool:
+    """Welcome new members once per join, without interrupting the public welcome."""
+    if member.bot or member.guild.id != GUILD_ID or not bot_dm_enabled(member.guild.id, member.id):
+        return False
+    try:
+        await member.send(guildkeeper_welcome_dm())
+        return True
+    except (discord.Forbidden, discord.HTTPException):
+        log.info('Welcome DM unavailable for user %s', member.id)
+        return False
+
+
 @bot.event
 # React to a new Guild member and kick off their onboarding.
 async def on_member_join(member: discord.Member):
     if member.guild.id == GUILD_ID and not member.bot:
-        if bot_dms_enabled(member.guild.id,member.id):
-            try:
-                await member.send(
-                    '✦ Welcome to GYMGUILD! Complete your Starter Quests to unlock all channels. '
-                    'Once complete, visit the Player Hub in **#stats-and-streaks** to turn '
-                    'off **Bot DMs** or open your private **Inbox**.',
-                    allowed_mentions=discord.AllowedMentions.none())
-            except (discord.Forbidden,discord.HTTPException):
-                pass
         await send_spawnpoint_welcome(member)
+        await send_guildkeeper_welcome_dm(member)
         await update_rank(member, get_xp(member.guild.id, member.id), announce=False)
         current_roles = {r.id for r in member.roles}
         if GYM_ROLE_IDS and current_roles & GYM_ROLE_IDS:
@@ -1386,6 +1411,223 @@ async def admin_milestone_test_reset(
         'event (an existing active boost does not trigger it).',
         ephemeral=True,
     )
+
+
+# Quest auto-completion is exclusively for the invoking server admin's test account.
+# Synthetic awards are clearly marked in the XP audit; real members still need
+# their usual evidence, Shopify verification, and Discord boost event.
+WEEKLY_TEST_XP = {'training1': 50, 'training2': 50, 'gym': 25, 'hobby': 25}
+
+
+def admin_complete_weekly_test(gid: int, uid: int) -> dict:
+    """Fill only missing current-week objectives and auto-turn in exactly once."""
+    wk = week_key()
+    awarded = 0
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        if db.execute(
+            "SELECT 1 FROM pauses p WHERE p.guild_id=? AND p.user_id=? AND p.week_key=? "
+            "AND NOT EXISTS (SELECT 1 FROM resumed_pauses r WHERE r.guild_id=p.guild_id "
+            "AND r.user_id=p.user_id AND r.week_key=p.week_key)",
+            (gid, uid, wk),
+        ).fetchone():
+            return {'paused': True, 'objectives': 0, 'completion': False, 'streak_awards': []}
+        for idx, (kind, xp) in enumerate(WEEKLY_TEST_XP.items()):
+            exists = db.execute(
+                'SELECT 1 FROM weekly_actions WHERE guild_id=? AND user_id=? '
+                'AND week_key=? AND kind=?', (gid, uid, wk, kind),
+            ).fetchone()
+            if exists:
+                continue
+            # Generate unique negative placeholder message IDs; no Discord proof
+            # message is fabricated. Never collide with a real message ID.
+            least = db.execute(
+                'SELECT MIN(message_id) AS lowest FROM weekly_actions'
+            ).fetchone()['lowest']
+            fake_id = min(0, least or 0) - 1
+            action_day = (datetime.fromisoformat(wk).date()
+                          + timedelta(days=idx)).isoformat()
+            db.execute(
+                'INSERT INTO weekly_actions VALUES (?,?,?,?,?,?,?,?)',
+                (gid, uid, wk, kind, action_day, fake_id,
+                 f'admin-test:{gid}:{uid}:{wk}:{kind}', utc_now().isoformat()),
+            )
+            add_xp(gid, uid, xp, f'Weekly {wk} {kind}', db)
+            awarded += 1
+            grant_once(db, 'starter_claims', gid, uid, 'first_steps',
+                       STARTER_REWARDS['first_steps'])
+        kinds = {r['kind'] for r in db.execute(
+            'SELECT kind FROM weekly_actions WHERE guild_id=? AND user_id=? AND week_key=?',
+            (gid, uid, wk),
+        )}
+        complete = False
+        if set(WEEKLY_TEST_XP).issubset(kinds):
+            complete = db.execute(
+                'INSERT OR IGNORE INTO weekly_completions VALUES (?,?,?,?)',
+                (gid, uid, wk, utc_now().isoformat()),
+            ).rowcount > 0
+            if complete:
+                add_xp(gid, uid, 50, 'Weekly completion ' + wk, db)
+                grant_once(db, 'milestone_claims', gid, uid, 'first_week',
+                           MILESTONE_XP['first_week'])
+    streak_awards = award_earned_streak_milestones(gid, uid) if complete else []
+    return {'paused': False, 'objectives': awarded,
+            'completion': complete, 'streak_awards': streak_awards}
+
+
+def admin_complete_starter_test(gid: int, uid: int) -> dict:
+    """Grant missing starter rewards without replaying a completed starter quest."""
+    added = 0
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        for kind, xp in STARTER_REWARDS.items():
+            added += int(grant_once(db, 'starter_claims', gid, uid, kind, xp))
+        turnin = db.execute(
+            'INSERT OR IGNORE INTO starter_turnins VALUES (?,?,?)',
+            (gid, uid, utc_now().isoformat()),
+        ).rowcount > 0
+    return {'objectives': added, 'turnin': turnin}
+
+
+def admin_complete_milestones_test(gid: int, uid: int) -> dict:
+    """Synthetic milestone claims for admin testing, including a labelled order.
+
+    This deliberately does not assert a real boost occurred, nor modify weekly
+    completion history. A pending genuine order review must be handled first.
+    """
+    awarded = []
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        if db.execute(
+            "SELECT 1 FROM purchase_orders WHERE guild_id=? AND user_id=? "
+            "AND status='pending' LIMIT 1", (gid, uid),
+        ).fetchone():
+            return {'blocked': True, 'awarded': [], 'completion': False}
+        old_completion = db.execute(
+            "SELECT 1 FROM milestone_claims WHERE guild_id=? AND user_id=? "
+            "AND kind='guild_completion'", (gid, uid),
+        ).fetchone() is not None
+        # Insert a synthetic, clearly labelled approved order only for the
+        # admin account when awarding its first purchase milestone.
+        has_purchase = db.execute(
+            "SELECT 1 FROM milestone_claims WHERE guild_id=? AND user_id=? "
+            "AND kind='purchase1'", (gid, uid),
+        ).fetchone() is not None
+        if not has_purchase:
+            label = f'ADMIN-TEST-{gid}-{uid}-{int(utc_now().timestamp() * 1000000)}'
+            db.execute(
+                "INSERT INTO purchase_orders "
+                "(guild_id,user_id,order_reference,status,submitted_at,reviewed_at,reviewed_by) "
+                "VALUES (?,?,?,'approved',?,?,?)",
+                (gid, uid, label, utc_now().isoformat(), utc_now().isoformat(), uid),
+            )
+        for kind, label, xp, description in MILESTONE_QUESTS:
+            if grant_once(db, 'milestone_claims', gid, uid, kind, xp):
+                awarded.append(kind)
+        completion = not old_completion and db.execute(
+            "SELECT 1 FROM milestone_claims WHERE guild_id=? AND user_id=? "
+            "AND kind='guild_completion'", (gid, uid),
+        ).fetchone() is not None
+    return {'blocked': False, 'awarded': awarded, 'completion': completion}
+
+
+def is_admin_quest_test_member(interaction: discord.Interaction) -> bool:
+    return (interaction.guild_id == GUILD_ID and
+            isinstance(interaction.user, discord.Member) and
+            interaction.user.guild_permissions.manage_guild)
+
+
+@bot.tree.command(name='admin_weekly_complete',
+                  description='Admin test: complete all your current weekly objectives')
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def admin_weekly_complete(interaction: discord.Interaction, confirm: bool):
+    if not is_admin_quest_test_member(interaction):
+        return await interaction.response.send_message('Admins only, in GYMGUILD.', ephemeral=True)
+    if not confirm:
+        return await interaction.response.send_message(
+            'Nothing changed. Set **confirm: True** to fill YOUR missing weekly objectives '
+            'with synthetic test records. This awards normal objective/completion XP '
+            'and can advance streaks. Existing weekly progress is preserved.',
+            ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    outcome = admin_complete_weekly_test(interaction.guild_id, interaction.user.id)
+    if outcome['paused']:
+        return await interaction.followup.send(
+            '⏸️ This week is paused. Resume XP first before test-completing it.',
+            ephemeral=True)
+    await update_rank(interaction.user, get_xp(interaction.guild_id, interaction.user.id))
+    await interaction.followup.send(
+        f'🧪 Weekly quest test complete: **{outcome["objectives"]}** new objectives; '
+        f'weekly completion **{"recorded" if outcome["completion"] else "already recorded"}**. '
+        f'🔥 Current streak: **{active_streak(interaction.guild_id, interaction.user.id)}** weeks. '
+        f'New streak milestones: **{len(outcome["streak_awards"])}**.',
+        ephemeral=True)
+
+
+@bot.tree.command(name='admin_starter_complete',
+                  description='Admin test: complete your starter quest and unlock Guild access')
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def admin_starter_complete(interaction: discord.Interaction, confirm: bool):
+    if not is_admin_quest_test_member(interaction):
+        return await interaction.response.send_message('Admins only, in GYMGUILD.', ephemeral=True)
+    if not confirm:
+        return await interaction.response.send_message(
+            'Nothing changed. Set **confirm: True** to award YOUR missing Starter Quest XP, '
+            'mark the quest turned in, and grant the configured Guild Member access role.',
+            ephemeral=True)
+    role = interaction.guild.get_role(STARTER_ACCESS_ROLE_ID) if STARTER_ACCESS_ROLE_ID else None
+    if role is None:
+        return await interaction.response.send_message(
+            'Starter role is not configured; no XP or progress was changed.', ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    if role not in interaction.user.roles:
+        try:
+            await interaction.user.add_roles(role, reason='Admin self-test Starter Quest completion')
+        except (discord.Forbidden, discord.HTTPException):
+            return await interaction.followup.send(
+                'Cannot assign the Guild Member role; no Starter Quest progress was changed.',
+                ephemeral=True)
+    result = admin_complete_starter_test(interaction.guild_id, interaction.user.id)
+    await update_rank(interaction.user, get_xp(interaction.guild_id, interaction.user.id),
+                      announce=False)
+    await interaction.followup.send(
+        f'🧪 Starter Quest complete: **{result["objectives"]}** newly awarded objectives '
+        f'and **{"new" if result["turnin"] else "existing"}** turn-in. '
+        'Guild Member access has been granted.',
+        ephemeral=True)
+
+
+@bot.tree.command(name='admin_milestones_complete',
+                  description='Admin test: complete all six of your milestone quests')
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def admin_milestones_complete(interaction: discord.Interaction, confirm: bool):
+    if not is_admin_quest_test_member(interaction):
+        return await interaction.response.send_message('Admins only, in GYMGUILD.', ephemeral=True)
+    if not confirm:
+        return await interaction.response.send_message(
+            'Nothing changed. Set **confirm: True** to test-award YOUR six milestone '
+            'objectives and any unclaimed +500 XP Main Quest bonus. This simulates '
+            'a verified purchase and server boost; it does NOT make a real purchase '
+            'or boost the server. An existing pending order must be resolved first.',
+            ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    result = admin_complete_milestones_test(interaction.guild_id, interaction.user.id)
+    if result['blocked']:
+        return await interaction.followup.send(
+            'You have a pending Order XP review. Cancel or resolve it first; nothing changed.',
+            ephemeral=True)
+    await update_rank(interaction.user, get_xp(interaction.guild_id, interaction.user.id))
+    await interaction.followup.send(
+        f'🧪 Milestones test complete: **{len(result["awarded"])}** new milestones; '
+        f'Main Quest completion **{"awarded" if result["completion"] else "already claimed"}**. '
+        'Synthetic purchase and boost achievements are for testing only.',
+        ephemeral=True)
 
 
 # Calculate a member's historical best streak, independent of current activity.
@@ -3840,6 +4082,8 @@ class PlayerStatsView(discord.ui.View):
             'Choose below to change your preference.',
             view=GuildBlastToggleView(interaction.user.id, enabled), ephemeral=True)
 
+
+
 class GuildBlastToggleView(discord.ui.View):
     def __init__(self, user_id: int, currently_enabled: bool | None = None):
         super().__init__(timeout=180)
@@ -4156,6 +4400,147 @@ async def admin_leaderboard_update(interaction: discord.Interaction):
     await interaction.followup.send(('✅ ' if ok else '⚠️ ') + message, ephemeral=True)
 
 
+BOT_DM_FOOTER = (
+    'Manage these reminders anytime: open the GYMGUILD Player Hub → Bot DMs → Turn Off.'
+)
+
+
+def bot_dm_reminder_kind(now: datetime | None = None) -> str | None:
+    """Saturday / Sunday from 09:00 UK local time, respecting BST/GMT."""
+    local = (now or utc_now()).astimezone(TZ)
+    if local.hour < 9:
+        return None
+    return {5: 'streak', 6: 'xp'}.get(local.weekday())
+
+
+def bot_dm_reminder_message(kind: str, streak: int, objectives: int) -> str:
+    if kind == 'streak':
+        return (
+            '🔥 **Your GYMGUILD streak is at risk!**\n'
+            f'You currently have a **{streak}-week streak**, but this week’s '
+            f'Side Quest is only **{objectives}/4 complete**. The next quest '
+            'reset is **Monday at 00:00 UK time**. Complete all four objectives '
+            'before then or activate an available pause to protect your streak.\n\n'
+            + BOT_DM_FOOTER
+        )
+    if kind == 'xp':
+        return (
+            '⚠️ **GYMGUILD XP reminder**\n'
+            'You have **0/4 Weekly Side Quest objectives** recorded this week. '
+            'At the **Monday 00:00 UK reset**, an unpaused week with zero '
+            'qualifying objectives incurs a **25 XP inactivity deduction** '
+            '(your total cannot drop below 0). Completing **any one** qualifying '
+            'objective or activating a pause avoids that deduction.\n\n'
+            + BOT_DM_FOOTER
+        )
+    raise ValueError('Unsupported reminder kind')
+
+
+def bot_dm_reminder_candidates(gid: int, now: datetime | None = None, include_opted_out=False) -> list[dict]:
+    """Return only members currently eligible for the daily reminder.
+
+    This is a read-only selection pass; the send path rechecks preferences
+    and uses a unique DB key to prevent duplicate messages after restarts.
+    """
+    kind = bot_dm_reminder_kind(now)
+    if kind is None:
+        return []
+    wk = week_key(now)
+    with connect() as db:
+        user_ids = [row['user_id'] for row in db.execute(
+            'SELECT user_id FROM members WHERE guild_id=?', (gid,))]
+    eligible = []
+    for uid in user_ids:
+        if (not include_opted_out and not bot_dm_enabled(gid, uid)) or is_paused(gid, uid, wk):
+            continue
+        objectives = len(weekly_status(gid, uid, wk) & set(WEEKLY_TEST_XP))
+        if kind == 'streak':
+            prior_streak = active_streak(gid, uid, now)
+            if objectives >= 4 or prior_streak <= 0:
+                continue
+        else:
+            if objectives != 0 or get_xp(gid, uid) <= 0:
+                continue
+            prior_streak = 0
+        eligible.append({
+            'guild_id': gid, 'user_id': uid, 'week_key': wk,
+            'kind': kind, 'streak': prior_streak, 'objectives': objectives,
+        })
+    return eligible
+
+
+def claim_bot_dm_reminder(gid: int, uid: int, wk: str, kind: str) -> bool:
+    """Atomically claim one reminder; opt-out and completion rechecked."""
+    if kind not in ('xp', 'streak'):
+        return False
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        pref = db.execute(
+            'SELECT dm_enabled AS enabled FROM notification_preferences WHERE guild_id=? AND user_id=?',
+            (gid, uid),
+        ).fetchone()
+        if pref is not None and not pref['enabled']:
+            return False
+        paused = db.execute(
+            'SELECT 1 FROM pauses p WHERE p.guild_id=? AND p.user_id=? AND p.week_key=? '
+            'AND NOT EXISTS (SELECT 1 FROM resumed_pauses r '
+            'WHERE r.guild_id=p.guild_id AND r.user_id=p.user_id AND r.week_key=p.week_key)',
+            (gid, uid, wk),
+        ).fetchone()
+        if paused:
+            return False
+        objectives = db.execute(
+            'SELECT COUNT(*) AS n FROM weekly_actions WHERE guild_id=? AND user_id=? '
+            'AND week_key=? AND kind IN (\'training1\',\'training2\',\'gym\',\'hobby\')',
+            (gid, uid, wk),
+        ).fetchone()['n']
+        if kind == 'xp' and objectives:
+            return False
+        if kind == 'streak' and objectives >= 4:
+            return False
+        return bool(db.execute(
+            'INSERT OR IGNORE INTO bot_dm_reminders '
+            '(guild_id,user_id,week_key,reminder_kind,attempted_at,status) '
+            "VALUES (?,?,?,?,?,'attempted')",
+            (gid, uid, wk, kind, utc_now().isoformat()),
+        ).rowcount)
+
+
+async def send_weekly_bot_dm_reminders(now: datetime | None = None) -> dict:
+    """No public announcements or @mentions; ignore Discord-disabled DMs."""
+    kind = bot_dm_reminder_kind(now)
+    stats = {'kind': kind, 'sent': 0, 'blocked': 0}
+    if kind is None:
+        return stats
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        return stats
+    for candidate in bot_dm_reminder_candidates(GUILD_ID, now):
+        member = guild.get_member(candidate['user_id'])
+        if member is None or member.bot:
+            continue
+        if not claim_bot_dm_reminder(
+            GUILD_ID, member.id, candidate['week_key'], candidate['kind']
+        ):
+            continue
+        status = 'sent'
+        try:
+            await member.send(bot_dm_reminder_message(
+                candidate['kind'], candidate['streak'], candidate['objectives']))
+            stats['sent'] += 1
+        except (discord.Forbidden, discord.HTTPException):
+            status = 'blocked'
+            stats['blocked'] += 1
+            log.info('GuildKeeper reminder DM unavailable for user %s', member.id)
+        with connect() as db:
+            db.execute(
+                'UPDATE bot_dm_reminders SET status=? WHERE guild_id=? '
+                'AND user_id=? AND week_key=? AND reminder_kind=?',
+                (status, GUILD_ID, member.id, candidate['week_key'], candidate['kind']),
+            )
+    return stats
+
+
 @tasks.loop(minutes=1)
 # Every minute, run independent jobs so one failed task cannot stop the rest. Health Check records failures.
 async def scheduler():
@@ -4263,3 +4648,4 @@ if __name__=='__main__':
     setup_db()
     migrate_monday_week_keys()
     bot.run(TOKEN)
+

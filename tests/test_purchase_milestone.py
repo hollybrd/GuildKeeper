@@ -310,6 +310,186 @@ class PurchaseMilestoneTests(unittest.TestCase):
         self.assertEqual(bot.submit_purchase_order(self.gid, self.uid, 'test-1002')[0], 'approved')
         self.assertEqual(bot.get_xp(self.gid, self.uid), 250)
 
+    def test_admin_weekly_complete_once_and_uses_real_progress(self):
+        wk = bot.week_key()
+        with bot.connect() as db:
+            db.execute('INSERT INTO weekly_actions VALUES (?,?,?,?,?,?,?,?)',
+                       (self.gid, self.uid, wk, 'gym', wk, 555,
+                        'real-gym-fingerprint', bot.utc_now().isoformat()))
+            bot.add_xp(self.gid, self.uid, 25, 'Weekly ' + wk + ' gym', db)
+        first = bot.admin_complete_weekly_test(self.gid, self.uid)
+        self.assertEqual(first['objectives'], 3)
+        self.assertTrue(first['completion'])
+        self.assertFalse(first['paused'])
+        self.assertEqual(bot.weekly_status(self.gid, self.uid, wk),
+                         set(bot.WEEKLY_TEST_XP))
+        self.assertEqual(bot.completed_weeks(self.gid, self.uid), 1)
+        self.assertEqual(bot.active_streak(self.gid, self.uid), 1)
+        expected = 200 + 25 + 10
+        self.assertEqual(bot.get_xp(self.gid, self.uid), expected)
+        again = bot.admin_complete_weekly_test(self.gid, self.uid)
+        self.assertEqual(again['objectives'], 0)
+        self.assertFalse(again['completion'])
+        self.assertEqual(bot.get_xp(self.gid, self.uid), expected)
+        self.assertEqual(bot.completed_weeks(self.gid, self.uid), 1)
+
+    def test_admin_weekly_autocomplete_refuses_paused_week(self):
+        wk = bot.week_key()
+        with bot.connect() as db:
+            db.execute('INSERT INTO pauses VALUES (?,?,?,?)',
+                       (self.gid, self.uid, wk, bot.utc_now().isoformat()))
+        self.assertTrue(bot.admin_complete_weekly_test(self.gid, self.uid)['paused'])
+        self.assertEqual(bot.weekly_status(self.gid, self.uid, wk), set())
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
+
+    def test_admin_starter_autocomplete_is_idempotent_and_does_not_add_messages(self):
+        first = bot.admin_complete_starter_test(self.gid, self.uid)
+        self.assertEqual(first, {'objectives': 5, 'turnin': True})
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 50)
+        self.assertEqual(bot.admin_complete_starter_test(self.gid, self.uid),
+                         {'objectives': 0, 'turnin': False})
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 50)
+        self.assertIn('**5/5 objectives completed.**', bot.starter_progress_text(self.gid, self.uid))
+        with bot.connect() as db:
+            claims = {row['kind'] for row in db.execute(
+                'SELECT kind FROM starter_claims WHERE guild_id=? AND user_id=?',
+                (self.gid, self.uid))}
+            self.assertEqual(claims, set(bot.STARTER_REWARDS))
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM starter_posts WHERE guild_id=? AND user_id=?',
+                (self.gid, self.uid)).fetchone()[0], 0)
+        with bot.connect() as db:
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM starter_turnins WHERE guild_id=? AND user_id=?',
+                (self.gid, self.uid)).fetchone()[0], 1)
+
+    def test_admin_milestone_complete_gives_six_objectives_and_bonus_once(self):
+        initial = bot.admin_complete_milestones_test(self.gid, self.uid)
+        self.assertFalse(initial['blocked'])
+        self.assertEqual(set(initial['awarded']),
+                         {kind for kind, _, _, _ in bot.MILESTONE_QUESTS})
+        self.assertTrue(initial['completion'])
+        expected = sum(xp for _, _, xp, _ in bot.MILESTONE_QUESTS) + 500
+        self.assertEqual(bot.get_xp(self.gid, self.uid), expected)
+        self.assertEqual(bot.milestone_progress(self.gid, self.uid)['completed'], 6)
+        self.assertEqual(bot.order_submission_status(self.gid, self.uid), 'approved')
+        self.assertEqual(bot.purchase_order_summary(self.gid, self.uid)['approved'], 1)
+        result = bot.admin_complete_milestones_test(self.gid, self.uid)
+        self.assertEqual(result['awarded'], [])
+        self.assertFalse(result['completion'])
+        self.assertEqual(bot.get_xp(self.gid, self.uid), expected)
+
+    def test_admin_milestones_refuses_pending_order_without_changes(self):
+        _, oid = bot.submit_purchase_order(self.gid, self.uid, 'test-order')
+        result = bot.admin_complete_milestones_test(self.gid, self.uid)
+        self.assertTrue(result['blocked'])
+        self.assertEqual(bot.get_xp(self.gid, self.uid), 0)
+        self.assertEqual(bot.milestone_progress(self.gid, self.uid)['completed'], 0)
+        self.assertEqual(bot.review_purchase_order(self.gid, oid, 11, True)[0], 'awarded')
+
+    def test_admin_quest_autocompletion_only_changes_selected_account(self):
+        bot.admin_complete_weekly_test(self.gid, self.uid)
+        bot.admin_complete_starter_test(self.gid, self.uid)
+        bot.admin_complete_milestones_test(self.gid, self.uid)
+        self.assertEqual(bot.get_xp(self.gid, self.uid + 1), 0)
+        self.assertEqual(bot.completed_weeks(self.gid, self.uid + 1), 0)
+        self.assertEqual(bot.milestone_progress(self.gid, self.uid + 1)['completed'], 0)
+
+    def test_bot_dms_enabled_by_default_and_member_opt_out(self):
+        self.assertTrue(bot.bot_dm_enabled(self.gid, self.uid))
+        bot.set_bot_dm_enabled(self.gid, self.uid, False)
+        self.assertFalse(bot.bot_dm_enabled(self.gid, self.uid))
+        self.assertIn('Turn On', bot.bot_dm_preference_text(False))
+        self.assertIn('Turn Off', bot.bot_dm_preference_text(True))
+        self.assertTrue(bot.bot_dm_enabled(self.gid, self.uid + 1))
+        bot.set_bot_dm_enabled(self.gid, self.uid, True)
+        self.assertTrue(bot.bot_dm_enabled(self.gid, self.uid))
+        bot.setup_db()
+        self.assertTrue(bot.bot_dm_enabled(self.gid, self.uid))
+        self.assertIn('Bot DMs', {button.label for button in bot.PlayerStatsView().children})
+        self.assertTrue(bot.PlayerStatsView().is_persistent())
+
+    def test_welcome_dm_short_and_respects_opt_out(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+        message = bot.guildkeeper_welcome_dm()
+        self.assertIn('Starter Quest', message)
+        self.assertIn('Bot DMs', message)
+        self.assertIn(
+            f'<#{bot.PLAYER_STATS_CHANNEL_ID}>' if bot.PLAYER_STATS_CHANNEL_ID
+            else '#stats-and-streaks', message)
+        self.assertIn('Turn Off', message)
+        self.assertLess(len(message), 450)
+        member = SimpleNamespace(
+            bot=False, id=self.uid, guild=SimpleNamespace(id=self.gid),
+            send=AsyncMock(),
+        )
+        with patch.object(bot, 'GUILD_ID', self.gid):
+            self.assertTrue(asyncio.run(bot.send_guildkeeper_welcome_dm(member)))
+            member.send.assert_awaited_once_with(message)
+            bot.set_bot_dm_enabled(self.gid, self.uid, False)
+            self.assertFalse(asyncio.run(bot.send_guildkeeper_welcome_dm(member)))
+            self.assertEqual(member.send.await_count, 1)
+
+    def test_reminder_calendar_saturday_and_sunday_uk(self):
+        from datetime import datetime, timezone
+        sat = datetime(2026, 11, 21, 9, 0, tzinfo=timezone.utc)
+        sun = datetime(2026, 11, 22, 9, 0, tzinfo=timezone.utc)
+        self.assertIsNone(bot.bot_dm_reminder_kind(sat - timedelta(minutes=1)))
+        self.assertEqual(bot.bot_dm_reminder_kind(sat), 'streak')
+        self.assertEqual(bot.bot_dm_reminder_kind(sun), 'xp')
+        self.assertIsNone(bot.bot_dm_reminder_kind(sun + timedelta(days=1)))
+        self.assertIn('Turn Off', bot.bot_dm_reminder_message('streak', 2, 3))
+        self.assertIn('2-week streak', bot.bot_dm_reminder_message('streak', 2, 3))
+        self.assertIn('25 XP', bot.bot_dm_reminder_message('xp', 0, 0))
+        self.assertIn('Turn Off', bot.bot_dm_reminder_message('xp', 0, 0))
+        # BST adjustment: 09:00 UK is 08:00 UTC in July.
+        summer = datetime(2026, 7, 18, 8, 0, tzinfo=timezone.utc)
+        self.assertEqual(bot.bot_dm_reminder_kind(summer), 'streak')
+
+    def test_reminder_eligibility_streak_and_xp_and_pause(self):
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+        sat = datetime(2026, 11, 21, 10, 0, tzinfo=timezone.utc)
+        sun = datetime(2026, 11, 22, 10, 0, tzinfo=timezone.utc)
+        previous = (bot.week_start(sat) - timedelta(days=7)).date().isoformat()
+        wk = bot.week_key(sat)
+        with bot.connect() as db:
+            db.execute('INSERT INTO members(guild_id,user_id,xp) VALUES (?,?,?)',
+                       (self.gid, self.uid, 100))
+            db.execute('INSERT INTO weekly_completions VALUES (?,?,?,?)',
+                       (self.gid, self.uid, previous, bot.utc_now().isoformat()))
+        with patch.object(bot, 'week_start', wraps=bot.week_start):
+            streak = bot.bot_dm_reminder_candidates(self.gid, sat)
+            self.assertEqual(len(streak), 1)
+            self.assertEqual(streak[0]['kind'], 'streak')
+            self.assertEqual(streak[0]['streak'], 1)
+        self.assertEqual(len(bot.bot_dm_reminder_candidates(self.gid, sun)), 1)
+        with bot.connect() as db:
+            db.execute('INSERT INTO weekly_actions VALUES (?,?,?,?,?,?,?,?)',
+                       (self.gid, self.uid, wk, 'hobby', wk, 201,
+                        'hobby-proof', bot.utc_now().isoformat()))
+        self.assertEqual(bot.bot_dm_reminder_candidates(self.gid, sun), [])
+        with bot.connect() as db:
+            db.execute('INSERT INTO pauses VALUES (?,?,?,?)',
+                       (self.gid, self.uid, wk, bot.utc_now().isoformat()))
+        self.assertEqual(bot.bot_dm_reminder_candidates(self.gid, sat), [])
+        bot.set_bot_dm_enabled(self.gid, self.uid, False)
+        self.assertEqual(bot.bot_dm_reminder_candidates(self.gid, sun), [])
+
+    def test_dm_reminder_deduplicates_and_obeys_opt_out(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 11, 22, 10, 0, tzinfo=timezone.utc)
+        wk = bot.week_key(now)
+        self.assertTrue(bot.claim_bot_dm_reminder(self.gid, self.uid, wk, 'xp'))
+        self.assertFalse(bot.claim_bot_dm_reminder(self.gid, self.uid, wk, 'xp'))
+        self.assertTrue(bot.claim_bot_dm_reminder(self.gid, self.uid, wk, 'streak'))
+        self.assertFalse(bot.claim_bot_dm_reminder(self.gid, self.uid, wk, 'streak'))
+        bot.set_bot_dm_enabled(self.gid, self.uid, False)
+        self.assertFalse(bot.claim_bot_dm_reminder(
+            self.gid, self.uid, bot.week_key(now + timedelta(days=7)), 'xp'))
+
     def test_streak_resets_on_missed_week_and_pause_preserves_count(self):
         from datetime import timedelta
         from unittest.mock import patch
@@ -533,3 +713,4 @@ class PurchaseMilestoneTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
