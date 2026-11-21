@@ -32,7 +32,7 @@ ORDER_QUERY = """query($search:String!){
       displayFulfillmentStatus totalPriceSet { shopMoney { amount currencyCode } } }
   }
 }"""
-CATALOG_QUERY = """query($first:Int!){ products(first:$first,query:"status:active",sortKey:PUBLISHED_AT,reverse:true){ nodes { id title handle tags onlineStoreUrl publishedAt featuredImage { url } variants(first:250){ nodes { price compareAtPrice } } } } }"""
+CATALOG_QUERY = """query($first:Int!){ products(first:$first,query:"status:active",sortKey:PUBLISHED_AT,reverse:true){ nodes { id title handle tags onlineStoreUrl publishedAt featuredImage { url } priceRangeV2 { minVariantPrice { amount } } compareAtPriceRange { maxVariantCompareAtPrice { amount } } } } }"""
 CODE_MUTATION = """mutation($input:DiscountCodeBasicInput!){
   discountCodeBasicCreate(basicCodeDiscount:$input){
     codeDiscountNode { id }
@@ -131,7 +131,7 @@ async def catalog(limit=30):
         if not admin_configured():
             raise ShopifyUnavailable("Public catalog unavailable; configure the Shopify app.")
     try:
-        data = await graphql(CATALOG_QUERY, {"first": min(100, max(1, limit))})
+        data = await graphql(CATALOG_QUERY, {"first": min(30, max(1, limit))})
     except aiohttp.ClientError as exc:
         raise ShopifyUnavailable("Shopify catalog connection failed.") from exc
     items = []
@@ -144,8 +144,8 @@ async def catalog(limit=30):
             "handle": product.get("handle"), "tags": product.get("tags") or [],
             "published_at": product.get("publishedAt"),
             "image": {"src": (product.get("featuredImage") or {}).get("url")},
-            "variants": [{"price": v.get("price"), "compare_at_price": v.get("compareAtPrice")}
-                         for v in (product.get("variants") or {}).get("nodes", [])],
+            "variants": [{"price": ((product.get("priceRangeV2") or {}).get("minVariantPrice") or {}).get("amount"),
+                          "compare_at_price": ((product.get("compareAtPriceRange") or {}).get("maxVariantCompareAtPrice") or {}).get("amount")}],
         })
     return normalize_products(items)
 
@@ -199,7 +199,13 @@ async def graphql(query,variables):
                 raise ShopifyError(f"Shopify API returned HTTP {response.status}. Check your app scopes and credentials.")
             data=await response.json()
     if data.get("errors"):
-        raise ShopifyError("Shopify rejected the API request; check integration permissions.")
+        # Only return fixed, non-sensitive diagnostic messages; never raw Shopify errors.
+        codes = {e.get("extensions", {}).get("code") for e in data["errors"] if isinstance(e, dict)}
+        if "ACCESS_DENIED" in codes:
+            raise ShopifyError("Shopify access denied. Confirm the app has the required approved scopes.")
+        if "MAX_COST_EXCEEDED" in codes or "THROTTLED" in codes:
+            raise ShopifyError("Shopify query limit reached. Try again shortly.")
+        raise ShopifyError("Shopify rejected the API query; check app permissions and API version.")
     return data.get("data") or {}
 
 

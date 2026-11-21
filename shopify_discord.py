@@ -106,10 +106,14 @@ async def browse(interaction,mode="all"):
     await interaction.response.defer(ephemeral=True,thinking=True)
     try:
         items=await shopify.catalog()
-    except (shopify.ShopifyUnavailable,shopify.ShopifyError,TimeoutError):
+    except (shopify.ShopifyUnavailable,shopify.ShopifyError,TimeoutError) as exc:
+        # Fixed messages from the client contain no credentials or Shopify response data.
+        detail = ""
+        if getattr(getattr(interaction.user, "guild_permissions", None), "manage_guild", False):
+            detail = "\nAdmin diagnostic: " + (str(exc) if isinstance(exc, (shopify.ShopifyUnavailable, shopify.ShopifyError)) else "Shopify request timed out.")
         return await interaction.followup.send(
             "⚠️ The live shop catalog could not be fetched. "
-            "Browse directly at https://gymguild.co.uk instead.",ephemeral=True)
+            "Browse directly at https://gymguild.co.uk instead." + detail,ephemeral=True)
     if mode=="sale":
         items=[x for x in items if x["sale"]]
     elif mode=="new":
