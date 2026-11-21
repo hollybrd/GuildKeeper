@@ -36,7 +36,7 @@ CATALOG_QUERY = """query($first:Int!){ products(first:$first,query:"status:activ
 CODE_MUTATION = """mutation($input:DiscountCodeBasicInput!){
   discountCodeBasicCreate(basicCodeDiscount:$input){
     codeDiscountNode { id }
-    userErrors { field message }
+    userErrors { field code }
   }
 }"""
 
@@ -246,7 +246,7 @@ def discount_input(rank,ticket_id,code,now):
         "code":code,"startsAt":now.astimezone(timezone.utc).isoformat(),
         "endsAt":(now+timedelta(days=7)).astimezone(timezone.utc).isoformat(),
         "usageLimit":1,"appliesOncePerCustomer":True,
-        "context":{"all":True},
+        "context":{"all":"ALL"},
         "customerGets":{"value":{"percentage":percentages[rank]/100},
                         "items":{"all":True}},
         "combinesWith":{"orderDiscounts":False,"productDiscounts":False,"shippingDiscounts":False},
@@ -267,8 +267,20 @@ async def create_discount(rank,ticket_id,code,now):
     errors=result.get("userErrors") or []
     if errors:
         raise ShopifyError("Shopify declined the discount: "+ "; ".join(
-            str(x.get("message") or "Invalid settings") for x in errors)[:250])
+            str(x.get("code") or "Invalid settings") + " (" + ".".join(x.get("field") or []) + ")" for x in errors)[:250])
     created=result.get("codeDiscountNode")
     if not created or not created.get("id"):
         raise ShopifyError("Shopify did not return a confirmed discount ID.")
     return created["id"]
+
+
+# Look up the exact reserved code, without changing any Shopify state.
+DISCOUNT_LOOKUP = """query($code:String!){codeDiscountNodeByCode(code:$code){id codeDiscount{__typename ... on DiscountCodeBasic { title status endsAt usageLimit asyncUsageCount customerGets { value { ... on DiscountPercentage { percentage } } } } } } }"""
+
+
+async def lookup_discount(code):
+    data = await graphql(DISCOUNT_LOOKUP, {"code": code})
+    # Absence is authoritative only when Shopify returns this explicit field.
+    if "codeDiscountNodeByCode" not in data:
+        raise ShopifyError("Shopify did not confirm the discount lookup.")
+    return data["codeDiscountNodeByCode"]
