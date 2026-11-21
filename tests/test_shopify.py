@@ -92,6 +92,26 @@ class ShopifyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(products[0]["url"],"https://gymguild.co.uk/products/oversized-tee")
         self.assertIn("£34.99",shopify_discord.price_label(products[0]))
 
+    async def test_catalog_falls_back_to_authorised_published_products(self):
+        body = {"products": {"nodes": [
+            {"id": "gid://shopify/Product/2", "title": "GYMGUILD tee",
+             "handle": "oversized-tee", "tags": [], "onlineStoreUrl": "https://gymguild.co.uk/products/oversized-tee",
+             "publishedAt": "2026-11-18T00:00:00Z", "featuredImage": {"url": "https://cdn.shopify.com/images/shirt.jpg"},
+             "variants": {"nodes": [{"price": "34.99", "compareAtPrice": "39.99"}]}},
+            {"id": "gid://shopify/Product/3", "title": "Unpublished", "onlineStoreUrl": None},
+            {"id": "gid://shopify/Product/4", "title": "Sample", "handle": "sample",
+             "tags": ["Sample Product"], "onlineStoreUrl": "https://gymguild.co.uk/products/sample",
+             "variants": {"nodes": [{"price": "10.00"}]}}
+        ]}}
+        with patch.object(shopify_client, "public_catalog", new=AsyncMock(side_effect=shopify_client.ShopifyUnavailable())), \
+             patch.object(shopify_client, "admin_configured", return_value=True), \
+             patch.object(shopify_client, "graphql", new=AsyncMock(return_value=body)) as query:
+            products = await shopify_client.catalog()
+        query.assert_awaited_once()
+        self.assertEqual([p["id"] for p in products], ["2"])
+        self.assertEqual(products[0]["price"], Decimal("34.99"))
+        self.assertTrue(products[0]["sale"])
+
     def test_config_requires_exact_myshopify_domain_and_token(self):
         with patch.dict(os.environ,{"SHOPIFY_ADMIN_DOMAIN":"fake.attacker.test",
                                     "SHOPIFY_ADMIN_TOKEN":"testing"},clear=False):
