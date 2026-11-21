@@ -9,7 +9,7 @@ An interrupted API response is NOT retried automatically to avoid duplicate code
 """
 import asyncio
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 import aiohttp
@@ -118,6 +118,7 @@ async def _issue_or_deliver(api,interaction,ticket_id,retry):
             status=saved["status"]
             now=api.utc_now()
 
+    expires_at = None
     if status in ("reserved","uncertain"):
         if saved is not None and not retry:
             return ("⚠️ A discount creation attempt is uncertain. Reopen Generate Shopify Code "
@@ -133,6 +134,7 @@ async def _issue_or_deliver(api,interaction,ticket_id,retry):
                 if not match_discount(api,ticket,node):
                     return "⚠️ Existing Shopify discount does not match an unused active reward. Manual review required."
                 shopify_gid = node["id"]
+                expires_at = datetime.fromisoformat(node["codeDiscount"]["endsAt"])
             else:
                 shopify_gid = None
         else:
@@ -142,6 +144,7 @@ async def _issue_or_deliver(api,interaction,ticket_id,retry):
                 # Shopify requires unique discount codes. Reuse the exact reservation,
                 # even if a previous create was successful but not yet visible.
                 shopify_gid=await shopify.create_discount(ticket["rank"],ticket_id,code,now)
+                expires_at = now + timedelta(days=7)
             except (shopify.ShopifyError,shopify.ShopifyUnavailable,TimeoutError,aiohttp.ClientError) as exc:
                 with api.connect() as db:
                     db.execute("""UPDATE shopify_reward_codes SET status='uncertain'
@@ -160,6 +163,18 @@ async def _issue_or_deliver(api,interaction,ticket_id,retry):
     elif status!="created":
         return "⚠️ This code is awaiting staff reconciliation in Shopify."
 
+    # A previously created code may be older than this delivery attempt.
+    # Read its actual expiry instead of accidentally promising seven new days.
+    if expires_at is None:
+        try:
+            node = await shopify.lookup_discount(code)
+        except (shopify.ShopifyError,shopify.ShopifyUnavailable,TimeoutError,aiohttp.ClientError) as exc:
+            return "⚠️ Unable to verify the saved discount expiry; delivery paused. " + diagnostic(exc)
+        if node is None or not match_discount(api,ticket,node):
+            return "⚠️ Saved discount is no longer a matching unused active reward. Manual review required."
+        expires_at = datetime.fromisoformat(node["codeDiscount"]["endsAt"])
+    expiry_stamp = int(expires_at.timestamp())
+
     # Recheck ticket after the network request; a moderator may have closed it.
     with api.connect() as db:
         current = db.execute("SELECT status,channel_id FROM reward_tickets WHERE id=? AND guild_id=?",
@@ -174,7 +189,8 @@ async def _issue_or_deliver(api,interaction,ticket_id,retry):
             f"🎟️ **GYMGUILD {ticket['rank']} Reward  -  {api.REWARD_RANKS[ticket['rank']]}% off**\n"
             f"Your single-use Shopify code: **\`{code}\`**\n"
             "Use it at https://gymguild.co.uk during checkout. "
-            "**Valid for 7 days after creation**, one order only. "
+            "**Valid for 7 days after creation**, one order only.\n"
+            f"**Expires:** <t:{expiry_stamp}:F> (<t:{expiry_stamp}:R>)\n"
             "Do not share your private reward code.",
             allowed_mentions=discord.AllowedMentions.none())
     except discord.HTTPException:
