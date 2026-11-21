@@ -190,6 +190,7 @@ class ShopifyTests(unittest.IsolatedAsyncioTestCase):
         for rank,percentage in (("Master",.10),("Legend",.15),("Paragon",.20)):
             data=shopify_client.discount_input(rank,42,"GG-CODE",now)
             self.assertEqual(data["usageLimit"],1)
+            self.assertEqual(data["context"],{"all":"ALL"})
             self.assertEqual(data["customerGets"]["value"]["percentage"],percentage)
             self.assertEqual((datetime.fromisoformat(data["endsAt"])-now).days,7)
             self.assertFalse(data["combinesWith"]["orderDiscounts"])
@@ -241,6 +242,66 @@ class ShopifyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("not confirm",first)
         self.assertIn("uncertain",second)
         create.assert_awaited_once()
+        self.assertEqual(shopify_rewards.get_ticket_code(bot,ticket_id)["status"],"uncertain")
+
+
+    async def test_recovery_checks_shopify_and_reuses_original_code(self):
+        ticket_id=779
+        with bot.connect() as db:
+            db.execute("INSERT INTO reward_tickets (id,guild_id,user_id,rank,channel_id,status,requested_at) VALUES (?,?,?,?,?,?,?)",
+                       (ticket_id,bot.GUILD_ID,50,"Master",1003,"open",bot.utc_now().isoformat()))
+            db.execute("INSERT INTO shopify_reward_codes (guild_id,reward_id,code,status,created_at) VALUES (?,?,?,?,?)",
+                       (bot.GUILD_ID,ticket_id,"GG-MASTER-779-SAVED","uncertain",bot.utc_now().isoformat()))
+        interaction=SimpleNamespace(channel_id=1003,channel=SimpleNamespace(send=AsyncMock()),
+                                    user=SimpleNamespace(id=111))
+        with patch.object(shopify_client,"lookup_discount",new=AsyncMock(return_value=None)) as lookup, \
+             patch.object(shopify_client,"create_discount",new=AsyncMock(return_value="gid://shopify/DiscountCodeNode/1")) as create:
+            status=await shopify_rewards.check_status(bot,interaction,ticket_id)
+            self.assertIn("No matching code",status)
+            create.assert_not_awaited()
+            result=await shopify_rewards.issue_or_deliver(bot,interaction,ticket_id,retry=True)
+            self.assertIn("delivered",result)
+            self.assertEqual(lookup.await_count,2)
+            create.assert_awaited_once()
+            self.assertEqual(create.call_args.args[2],"GG-MASTER-779-SAVED")
+        self.assertEqual(shopify_rewards.get_ticket_code(bot,ticket_id)["status"],"delivered")
+
+    async def test_recovery_existing_code_is_delivered_without_creation(self):
+        ticket_id=780
+        now=bot.utc_now()
+        with bot.connect() as db:
+            db.execute("INSERT INTO reward_tickets (id,guild_id,user_id,rank,channel_id,status,requested_at) VALUES (?,?,?,?,?,?,?)",
+                       (ticket_id,bot.GUILD_ID,50,"Master",1004,"open",now.isoformat()))
+            db.execute("INSERT INTO shopify_reward_codes (guild_id,reward_id,code,status,created_at) VALUES (?,?,?,?,?)",
+                       (bot.GUILD_ID,ticket_id,"GG-MASTER-780-SAVED","uncertain",now.isoformat()))
+        from datetime import timedelta
+        node={"id":"gid://shopify/DiscountCodeNode/2","codeDiscount":{"__typename":"DiscountCodeBasic",
+              "title":"GYMGUILD GuildKeeper Master #780","status":"ACTIVE","usageLimit":1,
+              "asyncUsageCount":0,"endsAt":(now+timedelta(days=1)).isoformat(),
+              "customerGets":{"value":{"percentage":0.1}}}}
+        interaction=SimpleNamespace(channel_id=1004,channel=SimpleNamespace(send=AsyncMock()),
+                                    user=SimpleNamespace(id=111))
+        with patch.object(shopify_client,"lookup_discount",new=AsyncMock(return_value=node)), \
+             patch.object(shopify_client,"create_discount",new=AsyncMock()) as create:
+            result=await shopify_rewards.issue_or_deliver(bot,interaction,ticket_id,retry=True)
+            self.assertIn("delivered",result)
+            create.assert_not_awaited()
+
+    async def test_recovery_lookup_failure_blocks_creation(self):
+        ticket_id=781
+        now=bot.utc_now()
+        with bot.connect() as db:
+            db.execute("INSERT INTO reward_tickets (id,guild_id,user_id,rank,channel_id,status,requested_at) VALUES (?,?,?,?,?,?,?)",
+                       (ticket_id,bot.GUILD_ID,50,"Master",1005,"open",now.isoformat()))
+            db.execute("INSERT INTO shopify_reward_codes (guild_id,reward_id,code,status,created_at) VALUES (?,?,?,?,?)",
+                       (bot.GUILD_ID,ticket_id,"GG-MASTER-781-SAVED","uncertain",now.isoformat()))
+        interaction=SimpleNamespace(channel_id=1005,channel=SimpleNamespace(send=AsyncMock()),
+                                    user=SimpleNamespace(id=111))
+        with patch.object(shopify_client,"lookup_discount",new=AsyncMock(side_effect=shopify_client.ShopifyError("access denied"))), \
+             patch.object(shopify_client,"create_discount",new=AsyncMock()) as create:
+            result=await shopify_rewards.issue_or_deliver(bot,interaction,ticket_id,retry=True)
+            self.assertIn("retry blocked",result)
+            create.assert_not_awaited()
         self.assertEqual(shopify_rewards.get_ticket_code(bot,ticket_id)["status"],"uncertain")
 
 
