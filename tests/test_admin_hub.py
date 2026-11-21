@@ -181,6 +181,24 @@ class PermanentPanelHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, [])
         repair.assert_not_awaited()
 
+    async def test_weekly_board_finds_pinned_current_board_even_with_old_title(self):
+        from unittest.mock import AsyncMock
+        week = '2026-11-16'
+        message = SimpleNamespace(author=SimpleNamespace(id=123), embeds=[
+            SimpleNamespace(title='Old quest title', footer=SimpleNamespace(text='Guildkeeper Weekly Side Quest • ' + week))])
+        channel = SimpleNamespace(pins=AsyncMock(return_value=[message]))
+        self.assertIs(await bot.find_current_weekly_board(channel, 123, week), message)
+        self.assertFalse(bot.is_current_weekly_board(message, 999, week))
+        self.assertFalse(bot.is_current_weekly_board(message, 123, '2026-11-23'))
+
+    async def test_weekly_repair_uses_shared_post_guard(self):
+        import panel_health
+        api = SimpleNamespace(post_weekly_board=AsyncMock(return_value=True))
+        guild = SimpleNamespace(me=SimpleNamespace(id=123))
+        ok, _ = await panel_health._repair_weekly(api, guild)
+        self.assertTrue(ok)
+        api.post_weekly_board.assert_awaited_once_with(force=True)
+
     async def test_mismatched_button_ids_are_outdated(self):
         from unittest.mock import patch
         import panel_health

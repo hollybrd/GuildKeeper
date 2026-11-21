@@ -3592,36 +3592,69 @@ def weekly_board_embed():
     return embed
 
 
-# Post only one current-week quest board using a saved unique key to prevent duplicates.
-async def post_weekly_board(force=False):
-    """Post at most one board per quest week, including after bot downtime."""
-    wk = week_key()
-    post_key = 'weekly-board-' + wk
-    with connect() as db:
-        if not force and db.execute('SELECT 1 FROM schedule_posts WHERE guild_id=? AND post_key=?', (GUILD_ID,post_key)).fetchone():
-            return
-    channel = bot.get_channel(QUESTS_CHANNEL_ID)
-    if not isinstance(channel,discord.TextChannel) or channel.guild.id != GUILD_ID:
-        return
-    try:
-        message = await channel.send(embed=weekly_board_embed(), view=WeeklyTurnInView())
-    except discord.HTTPException:
-        log.exception('Unable to post weekly quest board; will retry')
-        return
-    # Record only after the post succeeds. This also prevents duplicates on restart.
-    with connect() as db:
-        db.execute('INSERT OR IGNORE INTO schedule_posts VALUES (?,?)',(GUILD_ID,post_key))
-    # Pinning is optional: the bot needs Manage Messages for it.
-    try:
-        for pinned in await channel.pins():
-            if pinned.id == message.id or pinned.author.id != bot.user.id:
-                continue
-            if pinned.embeds and (pinned.embeds[0].footer.text or '').startswith(('Guildkeeper Weekly Trial', 'Guildkeeper Weekly Side Quest')):
-                await pinned.unpin(reason='Replace previous Guildkeeper weekly quest board')
-        await message.pin(reason='Current Guildkeeper weekly quest board')
-    except (discord.Forbidden, discord.HTTPException):
-        log.warning('Weekly quest board posted but could not update pins (Manage Messages permission required)')
+# Serialize scheduled posts and panel repairs in this bot process.
+_weekly_board_lock = asyncio.Lock()
 
+
+def is_current_weekly_board(message, author_id, wk):
+    if message.author.id != author_id or not message.embeds:
+        return False
+    footer = message.embeds[0].footer.text or ''
+    return (footer.startswith(('Guildkeeper Weekly Trial', 'Guildkeeper Weekly Side Quest'))
+            and footer.endswith(wk))
+
+
+async def find_current_weekly_board(channel, author_id, wk):
+    # Pins survive busy channels and restarts. History also catches unpinned boards.
+    for message in await channel.pins():
+        if is_current_weekly_board(message, author_id, wk):
+            return message
+    async for message in channel.history(limit=100):
+        if is_current_weekly_board(message, author_id, wk):
+            return message
+    return None
+
+
+async def post_weekly_board(force=False):
+    """Refresh in place, or publish once for a previously unpublished quest week."""
+    async with _weekly_board_lock:
+        wk = week_key()
+        post_key = 'weekly-board-' + wk
+        with connect() as db:
+            posted = db.execute('SELECT 1 FROM schedule_posts WHERE guild_id=? AND post_key=?',
+                                (GUILD_ID, post_key)).fetchone()
+        if posted and not force:
+            return True
+        channel = bot.get_channel(QUESTS_CHANNEL_ID)
+        if not isinstance(channel, discord.TextChannel) or channel.guild.id != GUILD_ID:
+            return False
+        try:
+            message = await find_current_weekly_board(channel, bot.user.id, wk)
+            if message is not None:
+                if force:
+                    await message.edit(embed=weekly_board_embed(), view=WeeklyTurnInView())
+            elif posted:
+                # A bounded history scan cannot prove a previously posted board was deleted.
+                log.warning('Weekly board already recorded; unable to locate it safely for refresh')
+                return False
+            else:
+                message = await channel.send(embed=weekly_board_embed(), view=WeeklyTurnInView())
+        except discord.HTTPException:
+            log.exception('Unable to inspect or refresh weekly quest board')
+            return False
+        with connect() as db:
+            db.execute('INSERT OR IGNORE INTO schedule_posts VALUES (?,?)', (GUILD_ID, post_key))
+        try:
+            for pinned in await channel.pins():
+                if pinned.id == message.id or pinned.author.id != bot.user.id:
+                    continue
+                if pinned.embeds and (pinned.embeds[0].footer.text or '').startswith(('Guildkeeper Weekly Trial', 'Guildkeeper Weekly Side Quest')):
+                    await pinned.unpin(reason='Replace previous Guildkeeper weekly quest board')
+            if not message.pinned:
+                await message.pin(reason='Current Guildkeeper weekly quest board')
+        except (discord.Forbidden, discord.HTTPException):
+            log.warning('Weekly quest board saved but unable to update pins')
+        return True
 
 @bot.tree.command(name='admin_weekly_post', description='Moderator: post or refresh this week’s quest board')
 @app_commands.default_permissions(manage_guild=True)
@@ -3633,7 +3666,9 @@ async def admin_weekly_post(interaction: discord.Interaction):
         await interaction.followup.send('Quest channel not found. Check QUESTS_CHANNEL_ID in .env.', ephemeral=True)
         return
     try:
-        await post_weekly_board(force=True)
+        ok = await post_weekly_board(force=True)
+        if not ok:
+            return await interaction.followup.send('Existing weekly board could not be located or refreshed safely; no duplicate posted.', ephemeral=True)
     except discord.HTTPException:
         log.exception('Manual weekly board posting failed')
         await interaction.followup.send('Unable to post the board. Check bot channel permissions.', ephemeral=True)

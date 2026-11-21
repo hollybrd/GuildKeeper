@@ -123,18 +123,13 @@ async def _weekly_board(api, guild):
     if guild.me is None:
         return _status(label, 'unknown', 'GuildKeeper bot identity unavailable')
     try:
-        async for message in channel.history(limit=100):
-            if not message.embeds or message.author.id != guild.me.id:
-                continue
+        message = await api.find_current_weekly_board(channel, guild.me.id, api.week_key())
+        if message is not None:
             embed = message.embeds[0]
-            if embed.title != expected.title:
-                continue
             if _same_embed(embed, expected) and sorted(_button_ids(message)) == sorted(
                 _expected_buttons(api.WeeklyTurnInView())):
                 return _status(label, 'current', 'Current weekly board', channel, message)
-            footer = embed.footer.text or ''
-            if footer.endswith(api.week_key()):
-                return _status(label, 'outdated', 'Current week board needs refreshing', channel, message)
+            return _status(label, 'outdated', 'Current week board needs refreshing', channel, message)
     except (discord.Forbidden, discord.HTTPException):
         return _status(label, 'unknown', 'Cannot inspect quest channel history')
     return _status(label, 'missing', 'No current-week board found in recent messages')
@@ -318,35 +313,11 @@ async def _repair_role_menu(api, guild, kind):
 
 # Repair the current week's board without posting an extra duplicate.
 async def _repair_weekly(api, guild):
-    channel = guild.get_channel(api.QUESTS_CHANNEL_ID)
-    if not isinstance(channel, discord.TextChannel):
-        return False, 'Weekly Side Quest: channel not configured'
-    expected = api.weekly_board_embed()
-    candidate = None
-    try:
-        async for message in channel.history(limit=100):
-            if message.author.id != guild.me.id or not message.embeds:
-                continue
-            if message.embeds[0].title != expected.title:
-                continue
-            if (message.embeds[0].footer.text or '').endswith(api.week_key()):
-                candidate = message
-                break
-    except (discord.Forbidden, discord.HTTPException):
-        return False, 'Weekly Side Quest: cannot inspect recent messages; skipped'
-    if candidate is not None:
-        try:
-            await candidate.edit(embed=expected, view=api.WeeklyTurnInView())
-        except (discord.Forbidden, discord.HTTPException):
-            return False, 'Weekly Side Quest: unable to edit existing board'
-        return True, 'Weekly Side Quest: updated existing board'
-    # Existing scheduler also uses this path; force avoids a stale schedule_posts flag.
-    await api.post_weekly_board(force=True)
-    # Verify a board appeared rather than assuming that the void-return function succeeded.
-    result = await _weekly_board(api, guild)
-    return (result['state'] == 'current',
-            'Weekly Side Quest: ' + ('new board posted' if result['state'] == 'current'
-                                    else 'unable to verify newly posted board'))
+    if guild.me is None:
+        return False, 'Weekly Side Quest: bot identity unavailable'
+    ok = await api.post_weekly_board(force=True)
+    return bool(ok), ('Weekly Side Quest: current board refreshed or published' if ok
+                      else 'Weekly Side Quest: unable to safely refresh board')
 
 
 # Apply the safe repairs that a moderator or maintenance job requested.

@@ -32,6 +32,7 @@ ORDER_QUERY = """query($search:String!){
       displayFulfillmentStatus totalPriceSet { shopMoney { amount currencyCode } } }
   }
 }"""
+CATALOG_QUERY = """query($first:Int!){ products(first:$first,query:"status:active",sortKey:PUBLISHED_AT,reverse:true){ nodes { id title handle tags onlineStoreUrl publishedAt featuredImage { url } variants(first:250){ nodes { price compareAtPrice } } } } }"""
 CODE_MUTATION = """mutation($input:DiscountCodeBasicInput!){
   discountCodeBasicCreate(basicCodeDiscount:$input){
     codeDiscountNode { id }
@@ -110,7 +111,7 @@ async def admin_token():
 
 
 # Fetch only public products and construct safe, official Shopify product links.
-async def catalog(limit=30):
+async def public_catalog(limit=30):
     """Only online-visible public products, excluding placeholder Sample Product tags."""
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as session:
         async with session.get(f"{SHOP_URL}/products.json",
@@ -119,11 +120,42 @@ async def catalog(limit=30):
             if response.status != 200:
                 raise ShopifyUnavailable("Shopify's public catalog is unavailable; use the Shop Online link.")
             data=await response.json(content_type=None)
+    return normalize_products(data.get("products", []))
+
+
+async def catalog(limit=30):
+    """Use the public feed when available; otherwise use the authorised Admin API."""
+    try:
+        return await public_catalog(limit)
+    except (ShopifyUnavailable, aiohttp.ClientError, TimeoutError, ValueError):
+        if not admin_configured():
+            raise ShopifyUnavailable("Public catalog unavailable; configure the Shopify app.")
+    try:
+        data = await graphql(CATALOG_QUERY, {"first": min(100, max(1, limit))})
+    except aiohttp.ClientError as exc:
+        raise ShopifyUnavailable("Shopify catalog connection failed.") from exc
+    items = []
+    for product in (data.get("products") or {}).get("nodes", []):
+        # Never expose draft or unpublished products through the private API.
+        if not product.get("onlineStoreUrl"):
+            continue
+        items.append({
+            "id": product["id"].rsplit("/", 1)[-1], "title": product.get("title"),
+            "handle": product.get("handle"), "tags": product.get("tags") or [],
+            "published_at": product.get("publishedAt"),
+            "image": {"src": (product.get("featuredImage") or {}).get("url")},
+            "variants": [{"price": v.get("price"), "compare_at_price": v.get("compareAtPrice")}
+                         for v in (product.get("variants") or {}).get("nodes", [])],
+        })
+    return normalize_products(items)
+
+
+def normalize_products(items):
     products=[]
-    for item in data.get("products", []):
+    for item in items:
         if "sample product" in {str(tag).casefold() for tag in item.get("tags", [])}:
             continue
-        handle=item.get("handle", "")
+        handle=item.get("handle") or ""
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,120}",handle):
             continue
         variants=item.get("variants") or []
@@ -141,7 +173,7 @@ async def catalog(limit=30):
         image=(item.get("image") or {}).get("src") or (
             ((item.get("images") or [{}])[0]).get("src"))
         if image and (not image.startswith("https://") or
-                      not urlparse(image).hostname.endswith((".shopify.com",".shopifycdn.net"))):
+                      not (urlparse(image).hostname or "").endswith((".shopify.com",".shopifycdn.net"))):
             image=None
         price=min(prices)
         sale=any(old>price for old in compare)
