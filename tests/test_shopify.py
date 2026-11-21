@@ -97,11 +97,12 @@ class ShopifyTests(unittest.IsolatedAsyncioTestCase):
             {"id": "gid://shopify/Product/2", "title": "GYMGUILD tee",
              "handle": "oversized-tee", "tags": [], "onlineStoreUrl": "https://gymguild.co.uk/products/oversized-tee",
              "publishedAt": "2026-11-18T00:00:00Z", "featuredImage": {"url": "https://cdn.shopify.com/images/shirt.jpg"},
-             "variants": {"nodes": [{"price": "34.99", "compareAtPrice": "39.99"}]}},
+             "priceRangeV2": {"minVariantPrice": {"amount": "34.99"}},
+             "compareAtPriceRange": {"maxVariantCompareAtPrice": {"amount": "39.99"}}},
             {"id": "gid://shopify/Product/3", "title": "Unpublished", "onlineStoreUrl": None},
             {"id": "gid://shopify/Product/4", "title": "Sample", "handle": "sample",
              "tags": ["Sample Product"], "onlineStoreUrl": "https://gymguild.co.uk/products/sample",
-             "variants": {"nodes": [{"price": "10.00"}]}}
+             "priceRangeV2": {"minVariantPrice": {"amount": "10.00"}}}
         ]}}
         with patch.object(shopify_client, "public_catalog", new=AsyncMock(side_effect=shopify_client.ShopifyUnavailable())), \
              patch.object(shopify_client, "admin_configured", return_value=True), \
