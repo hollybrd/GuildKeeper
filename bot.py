@@ -3638,6 +3638,47 @@ async def find_current_weekly_board(channel, author_id, wk):
     return None
 
 
+def weekly_board_date(message, author_id):
+    """Recognize only GuildKeeper's dated weekly quest board messages."""
+    if message.author.id != author_id or not message.embeds:
+        return None
+    footer = message.embeds[0].footer.text or ''
+    if not footer.startswith(('Guildkeeper Weekly Trial', 'Guildkeeper Weekly Side Quest')):
+        return None
+    try:
+        return datetime.strptime(footer[-10:], '%Y-%m-%d').date()
+    except ValueError:
+        return None
+
+
+async def cleanup_old_weekly_boards(channel, current, author_id, wk):
+    """Delete superseded boards only, never member posts or other bot panels."""
+    cutoff = datetime.strptime(wk, '%Y-%m-%d').date()
+    candidates = {}
+    try:
+        for message in await channel.pins():
+            candidates[message.id] = message
+    except discord.HTTPException:
+        log.warning('Unable to inspect pinned weekly boards')
+    try:
+        async for message in channel.history(limit=100):
+            candidates[message.id] = message
+    except discord.HTTPException:
+        log.warning('Unable to inspect weekly quest channel history')
+    for message in candidates.values():
+        if message.id == current.id:
+            continue
+        date = weekly_board_date(message, author_id)
+        if date is None or date > cutoff:
+            continue
+        try:
+            await message.delete()
+        except discord.NotFound:
+            pass
+        except discord.HTTPException:
+            log.warning('Unable to delete superseded weekly board %s', message.id)
+
+
 async def post_weekly_board(force=False):
     """Refresh in place, or publish once for a previously unpublished quest week."""
     async with _weekly_board_lock:
@@ -3668,15 +3709,11 @@ async def post_weekly_board(force=False):
         with connect() as db:
             db.execute('INSERT OR IGNORE INTO schedule_posts VALUES (?,?)', (GUILD_ID, post_key))
         try:
-            for pinned in await channel.pins():
-                if pinned.id == message.id or pinned.author.id != bot.user.id:
-                    continue
-                if pinned.embeds and (pinned.embeds[0].footer.text or '').startswith(('Guildkeeper Weekly Trial', 'Guildkeeper Weekly Side Quest')):
-                    await pinned.unpin(reason='Replace previous Guildkeeper weekly quest board')
             if not message.pinned:
                 await message.pin(reason='Current Guildkeeper weekly quest board')
-        except (discord.Forbidden, discord.HTTPException):
+        except discord.HTTPException:
             log.warning('Weekly quest board saved but unable to update pins')
+        await cleanup_old_weekly_boards(channel, message, bot.user.id, wk)
         return True
 
 @bot.tree.command(name='admin_weekly_post', description='Moderator: post or refresh this week’s quest board')

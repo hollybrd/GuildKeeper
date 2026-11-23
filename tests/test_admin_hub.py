@@ -191,6 +191,28 @@ class PermanentPanelHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(bot.is_current_weekly_board(message, 999, week))
         self.assertFalse(bot.is_current_weekly_board(message, 123, '2026-11-23'))
 
+    async def test_weekly_cleanup_only_removes_superseded_bot_boards(self):
+        def board(mid, author, footer):
+            return SimpleNamespace(id=mid, author=SimpleNamespace(id=author),
+                embeds=[SimpleNamespace(footer=SimpleNamespace(text=footer))],
+                delete=AsyncMock())
+        current = board(1, 123, 'Guildkeeper Weekly Side Quest • 2026-11-23')
+        old = board(2, 123, 'Guildkeeper Weekly Trial • 2026-11-16')
+        duplicate = board(3, 123, 'Guildkeeper Weekly Side Quest • 2026-11-23')
+        member = board(4, 456, 'Guildkeeper Weekly Side Quest • 2026-11-16')
+        unrelated = board(5, 123, 'GYMGUILD leaderboard • 2026-11-16')
+        future = board(6, 123, 'Guildkeeper Weekly Side Quest • 2026-11-30')
+        undated = board(7, 123, 'Guildkeeper Weekly Side Quest')
+        async def history(**kwargs):
+            for message in [current, old, duplicate, member, unrelated, future, undated]:
+                yield message
+        channel = SimpleNamespace(pins=AsyncMock(return_value=[old,current]),history=history)
+        await bot.cleanup_old_weekly_boards(channel,current,123,'2026-11-23')
+        old.delete.assert_awaited_once()
+        duplicate.delete.assert_awaited_once()
+        for message in (current,member,unrelated,future,undated):
+            message.delete.assert_not_awaited()
+
     async def test_weekly_repair_uses_shared_post_guard(self):
         import panel_health
         api = SimpleNamespace(post_weekly_board=AsyncMock(return_value=True))
