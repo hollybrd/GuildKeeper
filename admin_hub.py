@@ -482,6 +482,11 @@ def health_summary(guild):
 
 # Maintenance actions: synchronize roles, refresh panels, and configure the shop.
 class ControlMenu(PrivateMenu):
+    @discord.ui.button(label='Server Stats', emoji='📊', style=discord.ButtonStyle.secondary, row=1)
+    async def server_stats(self, interaction, button):
+        await interaction.response.send_message(
+            api.server_stats.describe(api), view=ServerStatsMenu(self.owner_id), ephemeral=True)
+
     @discord.ui.button(label='Shopify Store', emoji='🛍️', style=discord.ButtonStyle.secondary, row=1)
     async def shopify(self, interaction, button):
         await interaction.response.send_message(
@@ -518,6 +523,28 @@ class ControlMenu(PrivateMenu):
         await interaction.followup.send(
             panel_health.render(checks), view=PanelHealthMenu(self.owner_id), ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none())
+
+class ServerStatsMenu(PrivateMenu):
+    @discord.ui.button(label='Create / Enable', emoji='📊', style=discord.ButtonStyle.primary)
+    async def setup(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)
+        result = await api.server_stats.configure(api, interaction.guild)
+        audit(interaction.user.id, 'server_stats_setup', result)
+        await interaction.followup.send(result, ephemeral=True)
+
+    @discord.ui.button(label='Refresh', emoji='🔄', style=discord.ButtonStyle.secondary)
+    async def refresh(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)
+        result = await api.server_stats.refresh(api, interaction.guild)
+        await interaction.followup.send(result, ephemeral=True)
+
+    @discord.ui.button(label='Pause Updates', emoji='⏸️', style=discord.ButtonStyle.secondary)
+    async def pause(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)
+        result = await api.server_stats.pause(api)
+        audit(interaction.user.id, 'server_stats_pause', result)
+        await interaction.followup.send(result, ephemeral=True)
+
 
 def shopify_status():
     with api.connect() as db:

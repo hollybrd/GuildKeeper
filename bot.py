@@ -40,6 +40,7 @@ import shopify_discord
 import shopify_rewards
 import shopify_events
 import admin_maintenance
+import server_stats
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -316,6 +317,17 @@ def active_streak(gid, uid, now=None):
     return count
 
 # Persist each rank when its requirements are met; unlocks remain earned even after XP changes.
+def has_approved_purchase(gid, uid, db=None):
+    """An approved store order is the Paragon gate; pending/rejected orders do not count."""
+    if db is None:
+        with connect() as conn:
+            return has_approved_purchase(gid, uid, conn)
+    return db.execute(
+        "SELECT 1 FROM purchase_orders WHERE guild_id=? AND user_id=? AND status='approved' LIMIT 1",
+        (gid, uid),
+    ).fetchone() is not None
+
+
 def unlock_earned_ranks(gid, uid, xp):
     """Persist earned ranks while an active streak qualifies; no rank loss from broken streaks."""
     if gid is None or uid is None:
@@ -323,7 +335,8 @@ def unlock_earned_ranks(gid, uid, xp):
     current = active_streak(gid, uid)
     with connect() as db:
         for name, threshold in RANKS:
-            if name in STREAK_REQUIREMENTS and xp >= threshold and current >= STREAK_REQUIREMENTS[name]:
+            if (name in STREAK_REQUIREMENTS and xp >= threshold and current >= STREAK_REQUIREMENTS[name]
+                    and (name != 'Paragon' or has_approved_purchase(gid, uid, db))):
                 db.execute('INSERT OR IGNORE INTO rank_unlocks VALUES (?,?,?,?)', (gid,uid,name,utc_now().isoformat()))
 
 # Determine a displayed rank from XP, permanent unlocks and active-streak requirements.
@@ -346,6 +359,8 @@ def rank_for(xp, guild_id=None, user_id=None):
     else:
         unlocked = set()
     for name, threshold in reversed(RANKS):
+        if name == 'Paragon' and (guild_id is None or user_id is None or not has_approved_purchase(guild_id, user_id)):
+            continue
         if xp >= threshold and (name not in STREAK_REQUIREMENTS or name in unlocked):
             return name
     return 'Novice' if guild_id is not None and user_id is not None else 'Unranked'
@@ -370,8 +385,11 @@ def streak_blocked_rank_notice(gid: int, uid: int, xp: int) -> str:
         and name not in unlocked
         and (required := STREAK_REQUIREMENTS[name]) > streak
     ]
-    if not blocked:
+    purchase_blocked = xp >= dict(RANKS)['Paragon'] and not has_approved_purchase(gid, uid)
+    if not blocked and not purchase_blocked:
         return ''
+    if not blocked:
+        return '🔒 **Paragon:** Complete your first approved GYMGUILD store purchase to unlock this rank.'
     lines = ['🔒 **Streak requirement not yet met**',
              'You have enough XP, but still need an active weekly streak to unlock:']
     for name, required in blocked:
@@ -384,6 +402,8 @@ def streak_blocked_rank_notice(gid: int, uid: int, xp: int) -> str:
         'Paused weeks protect your streak but do not increase it. '
         'Once a rank is unlocked, you won\'t need to repeat its streak requirement.'
     )
+    if purchase_blocked:
+        lines.append('**Paragon** also requires a first approved GYMGUILD store purchase.')
     return '\n'.join(lines)
 
 
@@ -956,7 +976,7 @@ class RankProfileButtonView(discord.ui.View):
 async def ranks(interaction: discord.Interaction):
     xp = get_xp(interaction.guild_id, interaction.user.id)
     streak_notice = streak_blocked_rank_notice(interaction.guild_id, interaction.user.id, xp)
-    await interaction.response.send_message( '**GYMGUILD RANKS**\n'+'\n'.join(f'✦ **{name}**  -  {threshold:,} XP' + (f' + {STREAK_REQUIREMENTS[name]}-week **active** streak to unlock' if name in STREAK_REQUIREMENTS else '') for name,threshold in RANKS) + '\n\n**Rank rules:** Streaks must be active when unlocking Master, Legend or Paragon. Once unlocked, breaking your streak will not demote you; losing XP below a rank threshold can. Regaining XP restores previously unlocked ranks without repeating the streak.\n**Rewards:** Master (10%), Legend (15%) and Paragon (20%) are unlocked permanently when their rank requirements are first met. Each reward can be claimed **once**, even after an XP demotion. Paused weeks preserve streaks but do not increase them.' + ('\n\n' + streak_notice if streak_notice else ''), view=RankProfileButtonView(interaction.user.id), ephemeral=True)
+    await interaction.response.send_message( '**GYMGUILD RANKS**\n'+'\n'.join(f'✦ **{name}**  -  {threshold:,} XP' + (f' + {STREAK_REQUIREMENTS[name]}-week **active** streak to unlock' if name in STREAK_REQUIREMENTS else '') + (' + first approved store purchase' if name == 'Paragon' else '') for name,threshold in RANKS) + '\n\n**Rank rules:** Streaks must be active when unlocking Master, Legend or Paragon. Paragon also requires an approved store purchase. Once unlocked, breaking your streak will not demote you; losing XP below a rank threshold can. Regaining XP restores previously unlocked ranks without repeating the streak.\n**Rewards:** Master (10%), Legend (15%) and Paragon (20%) are unlocked permanently when their rank requirements are first met. Each reward can be claimed **once**, even after an XP demotion. Paused weeks preserve streaks but do not increase them.' + ('\n\n' + streak_notice if streak_notice else ''), view=RankProfileButtonView(interaction.user.id), ephemeral=True)
 
 
 
@@ -1705,10 +1725,12 @@ def reward_eligibility_text(gid: int, uid: int) -> str:
     for rank, discount in REWARD_RANKS.items():
         if rank in requests:
             status = 'Already requested (' + requests[rank] + ')'
-        elif rank in unlocked:
+        elif rank in unlocked and (rank != 'Paragon' or has_approved_purchase(gid, uid)):
             status = 'Eligible  -  unclaimed'
         else:
             status = 'Locked  -  requires ' + str(STREAK_REQUIREMENTS[rank]) + '-week active streak and ' + str(dict(RANKS)[rank]) + ' XP'
+            if rank == 'Paragon':
+                status += ' and an approved store purchase'
         lines.append(f'• **{rank} ({discount}% off):** {status}')
     return '\n'.join(lines)
 
@@ -3170,9 +3192,10 @@ async def create_reward_ticket(interaction: discord.Interaction, rank: str):
     with connect() as db:
         unlocked = db.execute('SELECT 1 FROM rank_unlocks WHERE guild_id=? AND user_id=? AND rank=?',
                               (interaction.guild_id, interaction.user.id, rank)).fetchone()
-    if not unlocked:
+    if not unlocked or (rank == 'Paragon' and not has_approved_purchase(interaction.guild_id, interaction.user.id)):
         return await interaction.response.send_message(
-            f'You must first unlock **{rank}** with its XP and active-streak requirements to claim this reward.', ephemeral=True)
+            f'You must first unlock **{rank}** with its XP and active-streak requirements' +
+            (' and an approved store purchase' if rank == 'Paragon' else '') + ' to claim this reward.', ephemeral=True)
     guild = interaction.guild
     category = guild.get_channel(REWARD_TICKETS_CATEGORY_ID)
     modrole = guild.get_role(MOD_ROLE_ID)
@@ -3231,7 +3254,7 @@ def reward_button_state(gid: int, uid: int) -> dict[str, str]:
         requested = {row['rank'] for row in db.execute(
             'SELECT rank FROM reward_tickets WHERE guild_id=? AND user_id=?', (gid, uid))}
     return {rank: ('requested' if rank in requested else
-                   'available' if rank in unlocked else 'locked')
+                   'available' if rank in unlocked and (rank != 'Paragon' or has_approved_purchase(gid, uid)) else 'locked')
             for rank in REWARD_RANKS}
 
 
@@ -3788,12 +3811,14 @@ def ranks_progress_embed(gid: int, uid: int) -> discord.Embed:
     for name, threshold in RANKS:
         requirement = (f'{threshold:,} XP + **{STREAK_REQUIREMENTS[name]}-week active streak**'
                        if name in STREAK_REQUIREMENTS else f'{threshold:,} XP')
+        if name == 'Paragon':
+            requirement += ' + **first approved store purchase**'
         reward = f' · **{REWARD_RANKS[name]}% reward**' if name in REWARD_RANKS else ''
         embed.add_field(name=f'✦ {name}', value=requirement + reward, inline=False)
     embed.add_field(name='🔒 Rank & reward rules', value=(
         'Streak requirements must be met **while your streak is active**. '
         'Paused weeks protect a streak but do not add to it.\n\n'
-        'Unlocked ranks survive broken streaks. Only losing XP below a rank threshold can demote you; '
+        'Unlocked ranks survive broken streaks. Losing XP below a rank threshold can demote you; Paragon also requires an approved purchase. '
         'earning the XP back restores that rank without repeating the streak.\n\n'
         '**Each rank reward unlocks permanently and can be claimed once**, '
         'even if you later drop to a lower rank.'), inline=False)
@@ -4589,6 +4614,7 @@ async def scheduler():
         ('reward_ticket_expiry', expire_reward_tickets),
         ('scheduled_announcements', announcements_scheduler.tick),
         ('shopify_store_events', shopify_events.tick),
+        ('server_stats', lambda: server_stats.tick(sys.modules[__name__])),
     ):
         try:
             result = operation()

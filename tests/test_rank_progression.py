@@ -78,6 +78,34 @@ class RankProgressionTests(unittest.TestCase):
         self.assertEqual(bot.rank_for(0, self.guild_id, self.user_id), "Novice")
         self.assertEqual(bot.rank_for(1000, self.guild_id, self.user_id), "Master")
 
+    def test_paragon_requires_approved_purchase_and_streak(self):
+        from unittest.mock import patch
+        self.finish_starter()
+        with patch.object(bot, 'active_streak', return_value=8):
+            self.assertEqual(bot.rank_for(5000,self.guild_id,self.user_id), 'Legend')
+            self.assertIn('approved', bot.streak_blocked_rank_notice(self.guild_id,self.user_id,5000))
+            with bot.connect() as db:
+                db.execute("INSERT INTO purchase_orders (guild_id,user_id,order_reference,status,submitted_at) VALUES (?,?,?,?,?)",
+                           (self.guild_id,self.user_id,'test-order','pending',bot.utc_now().isoformat()))
+            self.assertEqual(bot.rank_for(5000,self.guild_id,self.user_id), 'Legend')
+            with bot.connect() as db:
+                db.execute("UPDATE purchase_orders SET status='approved' WHERE guild_id=? AND user_id=?",(self.guild_id,self.user_id))
+            self.assertEqual(bot.rank_for(4999,self.guild_id,self.user_id), 'Legend')
+            self.assertEqual(bot.rank_for(5000,self.guild_id,self.user_id), 'Paragon')
+        with patch.object(bot, 'active_streak', return_value=0):
+            self.assertEqual(bot.rank_for(5000,self.guild_id,self.user_id), 'Paragon')
+
+    def test_existing_paragon_unlock_requires_purchase_for_role_and_reward(self):
+        self.finish_starter()
+        with bot.connect() as db:
+            db.execute("INSERT INTO members(guild_id,user_id,xp) VALUES (?,?,?)",(self.guild_id,self.user_id,5000))
+            for rank in ('Legend','Paragon'):
+                db.execute("INSERT INTO rank_unlocks VALUES (?,?,?,?)",
+                           (self.guild_id,self.user_id,rank,bot.utc_now().isoformat()))
+        self.assertEqual(bot.rank_for(5000,self.guild_id,self.user_id),'Legend')
+        self.assertEqual(bot.reward_button_state(self.guild_id,self.user_id)['Paragon'],'locked')
+        self.assertIn('approved store purchase',bot.reward_eligibility_text(self.guild_id,self.user_id))
+
     def test_streak_notice_only_when_xp_is_enough_but_streak_locked(self):
         self.finish_starter()
         self.assertEqual(

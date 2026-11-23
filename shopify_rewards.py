@@ -99,6 +99,8 @@ async def _issue_or_deliver(api,interaction,ticket_id,retry):
             return "⚠️ Reward ticket is unavailable."
         if ticket["rank"] not in api.REWARD_RANKS:
             return "⚠️ Unknown reward rank."
+        if ticket["rank"] == "Paragon" and ticket["status"] == "open" and not api.has_approved_purchase(api.GUILD_ID, ticket["user_id"], db):
+            return "⚠️ Paragon rewards require an approved GYMGUILD store purchase."
         saved=db.execute("SELECT * FROM shopify_reward_codes WHERE guild_id=? AND reward_id=?",
                          (api.GUILD_ID,ticket_id)).fetchone()
         if saved is None:
