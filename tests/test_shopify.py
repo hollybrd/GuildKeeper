@@ -218,6 +218,11 @@ class ShopifyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("already delivered",again)
         create.assert_awaited_once()
         send.assert_awaited_once()
+        from datetime import timedelta
+        expiry = int((create.call_args.args[3] + timedelta(days=7)).timestamp())
+        self.assertIn("Valid for 7 days after creation", send.call_args.args[0])
+        self.assertIn(f"<t:{expiry}:F>", send.call_args.args[0])
+        self.assertIn(f"<t:{expiry}:R>", send.call_args.args[0])
         row=shopify_rewards.get_ticket_code(bot,ticket_id)
         self.assertEqual(row["status"],"delivered")
         with bot.connect() as db:
@@ -286,6 +291,8 @@ class ShopifyTests(unittest.IsolatedAsyncioTestCase):
             result=await shopify_rewards.issue_or_deliver(bot,interaction,ticket_id,retry=True)
             self.assertIn("delivered",result)
             create.assert_not_awaited()
+        expiry = int((now + timedelta(days=1)).timestamp())
+        self.assertIn(f"<t:{expiry}:F>", interaction.channel.send.call_args.args[0])
 
     async def test_recovery_lookup_failure_blocks_creation(self):
         ticket_id=781
